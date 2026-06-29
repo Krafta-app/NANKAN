@@ -1,0 +1,15 @@
+# 秘密情報（絶対にコミットしない）
+.streamlit/secrets.toml
+
+# ローカル専用データ（クラウドはSupabaseを使う）
+data/
+cache/
+logs/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+.DS_Store

@@ -1,0 +1,15 @@
+# Streamlit 設定（スマホ/PC 両対応で常時起動するため）
+# secrets.toml（APIキー・競馬ブック認証）は別ファイルでそのまま使用。
+
+[server]
+# 0.0.0.0 = LAN内の他端末（スマホ等）や Tailscale からも見られるようにする
+address = "0.0.0.0"
+port = 8501
+# headless は launchd 側でのみ true（手動の run_umai.command 起動時はブラウザを自動で開く）
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#1976d2"

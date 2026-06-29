@@ -1,0 +1,291 @@
+import streamlit as st
+
+# 【重要】これが必ずファイルの先頭（importよりも前）になければなりません
+st.set_page_config(page_title="南関競馬AI予想くん", layout="wide")
+
+import datetime
+from datetime import timezone, timedelta
+import time
+import traceback
+import re
+
+# 外部ファイル読み込み（エラーハンドリング付き）
+try:
+    import keiba_bot
+except ImportError as e:
+    st.error(f"❌ 'keiba_bot.py' が見つかりません: {e}")
+    st.stop()
+except Exception as e:
+    st.error(f"❌ 'keiba_bot.py' の読み込み中にエラーが発生しました:\n{e}")
+    st.stop()
+
+import streamlit.components.v1 as components
+import ui_common as ui
+ui.setup()  # DB初期化＋既存キャッシュの台帳取込（左メニューのアーカイブ/結果/メモで使用）
+
+def main():
+    # クラウド版（Streamlit Cloud）では生成(Selenium)は動かさず、閲覧に誘導する
+    if ui.is_cloud():
+        st.title("🐎 南関競馬AI（クラウド版）")
+        st.success("スマホからいつでも閲覧できます。左メニューから選んでください。")
+        st.markdown(
+            "- 📚 **アーカイブ** … 過去の予想を表示\n"
+            "- 🏁 **結果・成績** … 着順照合・tier別的中率\n"
+            "- 📝 **メモ** … 馬ごとのメモ\n\n"
+            "新しい予想の生成は **Mac の `run_umai.command`** で行うと、自動でここに反映されます。"
+        )
+        return
+
+    st.title("🐎 南関競馬 AI予想生成 & 対戦表")
+
+    # --- サイドバー設定 ---
+    with st.sidebar:
+        st.header("開催設定")
+        # 日本時間をデフォルトにする
+        JST = timezone(timedelta(hours=+9), 'JST')
+        today = datetime.datetime.now(JST).date()
+        target_date = st.date_input("開催日", today)
+        
+        place_options = {"大井": "10", "川崎": "11", "船橋": "12", "浦和": "13"}
+        selected_place = st.selectbox("競馬場", list(place_options.keys()))
+        place_code = place_options[selected_place]
+        
+        st.divider()
+        st.subheader("開催手動入力 (自動取得失敗時)")
+        st.caption("※通常は自動判定しますが、エラー時はチェックを入れて手動入力してください。")
+        use_manual_kai = st.checkbox("開催回数を手動で指定する")
+        manual_kai = st.number_input("第○回", min_value=1, max_value=20, value=1, step=1, disabled=not use_manual_kai)
+        manual_nichi = st.number_input("○日目", min_value=1, max_value=6, value=1, step=1, disabled=not use_manual_kai)
+
+        st.divider()
+        st.subheader("モード選択")
+        # （修正前） ("dify", "pace", "raw")
+        exec_mode = st.radio(
+            "実行モード",
+            ("dify", "relative", "pace", "raw"),
+            format_func=lambda x: {
+                "dify": "📊 相対評価で予想する",
+                "relative": "📊 詳細比較のみ再計算",
+                "pace": "⏱️ 展開のみ(高速)",
+                "raw": "📋 データのみ取得(コピペ用)"
+            }[x]
+        )
+        
+        st.write("")
+        bypass_cache = st.checkbox("🔄 キャッシュを使用せず強制的に再集計する", value=False)
+        
+        st.divider()
+        st.subheader("対象レース選択")
+        
+        if "selected_races" not in st.session_state:
+            st.session_state.selected_races = [10, 11, 12]
+
+        def update_all_checkboxes(state: bool):
+            for r in range(1, 13):
+                st.session_state[f"chk_{r}"] = state
+
+        col_a, col_c = st.columns(2)
+        with col_a:
+            st.button("全選択", on_click=update_all_checkboxes, args=(True,))
+        with col_c:
+            st.button("全解除", on_click=update_all_checkboxes, args=(False,))
+
+        selected_races_final = []
+        cols = st.columns(3)
+        for r in range(1, 13):
+            # 初期値の設定
+            key_name = f"chk_{r}"
+            if key_name not in st.session_state:
+                st.session_state[key_name] = (r in st.session_state.selected_races)
+            
+            with cols[(r-1)%3]:
+                if st.checkbox(f"{r}R", key=key_name):
+                    selected_races_final.append(r)
+        
+        st.session_state.selected_races = selected_races_final
+
+        if "results_cache" not in st.session_state:
+            st.session_state.results_cache = {}
+        if "failed_races" not in st.session_state:
+            st.session_state.failed_races = set()
+
+        st.caption("※相対評価・対戦表の取得に時間がかかる場合があります")
+        start_btn = st.button("実行開始", type="primary", key="btn_start")
+        
+        if st.button("結果クリア"):
+            st.session_state.results_cache = {}
+            st.session_state.failed_races = set()
+            st.rerun()
+
+    # --- メイン処理エリア ---
+    result_container = st.container()
+
+    # 1. 既存の結果表示
+    if st.session_state.results_cache and not start_btn:
+        with result_container:
+            st.success("📝 生成結果を表示しています")
+            
+            # 全結果まとめ
+            full_text = []
+            full_text.append(f"【{target_date.strftime('%Y/%m/%d')} {selected_place} データまとめ】\n")
+            for r_num, content_dict in sorted(st.session_state.results_cache.items()):
+                text_val = content_dict.get("text", "") if isinstance(content_dict, dict) else content_dict
+                disp_val = keiba_bot.strip_display_markers(text_val)
+                full_text.append(f"\n{'='*35}\n {selected_place} {r_num}R\n{'='*35}\n{disp_val}\n")
+            
+            with st.expander("📚 全レース結果をまとめてコピーする", expanded=True):
+                st.text_area("全レース結果", value="\n".join(full_text), height=300, key="res_all_summary")
+            
+            # 合算HTML（全レースをタブ切り替えで見られるHTMLファイル）
+            if len(st.session_state.results_cache) >= 1:
+                combined_html = keiba_bot.generate_combined_html(
+                    target_date.year, f"{target_date.month:02}", f"{target_date.day:02}",
+                    selected_place, st.session_state.results_cache
+                )
+                st.download_button(
+                    label=f"📥 全{len(st.session_state.results_cache)}レースまとめHTMLをダウンロード",
+                    data=combined_html,
+                    file_name=f"{target_date.strftime('%Y%m%d')}_{selected_place}_全レース.html",
+                    mime="text/html",
+                    key="dl_combined_html"
+                )
+            
+            st.divider()
+
+            for r_num, content_dict in sorted(st.session_state.results_cache.items()):
+                st.subheader(f"{selected_place} {r_num}R")
+                text_val = content_dict.get("text", "") if isinstance(content_dict, dict) else content_dict
+                disp_val = keiba_bot.strip_display_markers(text_val)
+                html_val = content_dict.get("html", "") if isinstance(content_dict, dict) else ""
+                
+                if html_val:
+                    with st.expander("🖥 整形ビュー（展開/相対評価/出走馬分析/対戦表タブ）", expanded=True):
+                        components.html(html_val, height=820, scrolling=True)
+                st.text_area(
+                    label=f"{r_num}R 結果（コピー用テキスト）",
+                    value=disp_val,
+                    height=300,
+                    key=f"res_cache_{r_num}"
+                )
+                if html_val:
+                    st.download_button(
+                        label=f"📥 {r_num}R HTMLをダウンロード",
+                        data=html_val,
+                        file_name=f"{target_date.strftime('%Y%m%d')}_{selected_place}{r_num}R.html",
+                        mime="text/html",
+                        key=f"dl_cache_{r_num}"
+                    )
+                st.caption("💡 過去の予想・結果・馬メモは左メニューの「アーカイブ / 結果成績 / メモ」から。")
+                st.divider()
+
+    # 2. リトライボタン（失敗レースがある場合）
+    retry_btn = False
+    if st.session_state.failed_races and not start_btn:
+        with result_container:
+            failed_list = sorted(st.session_state.failed_races)
+            st.warning(f"⚠️ 以下のレースでエラーが発生しました: {', '.join([f'{r}R' for r in failed_list])}")
+            retry_btn = st.button(f"🔄 失敗した{len(failed_list)}レースをリトライ", type="primary", key="btn_retry")
+
+    # 3. 新規実行 or リトライ
+    if start_btn or retry_btn:
+        if start_btn:
+            if not selected_races_final:
+                st.warning("レースを選択してください。")
+                st.stop()
+            # 新規実行時のみキャッシュクリア
+            st.session_state.results_cache = {}
+            st.session_state.failed_races = set()
+            races_to_run = set(selected_races_final)
+        else:
+            # リトライ: 失敗レースのみ実行、成功分は保持
+            races_to_run = st.session_state.failed_races.copy()
+            st.session_state.failed_races = set()
+        
+        year = target_date.year
+        month = f"{target_date.month:02}"
+        day = f"{target_date.day:02}"
+        
+        status_area = st.empty()
+        
+        mode_text_map = {"dify": "相対評価予想", "relative": "詳細比較再計算", "pace": "展開予想のみ", "raw": "データ取得"}
+        mode_text = mode_text_map.get(exec_mode, "実行")
+        status_area.info(f"🚀 {year}/{month}/{day} {selected_place}競馬 ({len(selected_races_final)}レース) の【{mode_text}】を開始します...")
+
+        # 手動入力のパラメータ
+        manual_param = {"kai": manual_kai, "nichi": manual_nichi} if use_manual_kai else None
+
+        try:
+            # ジェネレータ実行
+            for event in keiba_bot.run_races_iter(year, month, day, place_code, races_to_run, mode=exec_mode, manual_kai_nichi=manual_param, bypass_cache=bypass_cache):
+                
+                e_type = event.get("type")
+                e_data = event.get("data")
+
+                if e_type == "status":
+                    status_area.info(e_data)
+                
+                elif e_type == "error":
+                    st.error(e_data)
+                    # レース番号を抽出してfailed_racesに追加
+                    err_match = re.search(r'(\d+)R', str(e_data))
+                    if err_match:
+                        st.session_state.failed_races.add(int(err_match.group(1)))
+                    
+                elif e_type == "early_result":
+                    race_num = event.get("race_num")
+                    early_text = event.get("data_text", "")
+                    
+                    with result_container:
+                        st.subheader(f"{selected_place} {race_num}R")
+                        st.text_area(
+                            label=f"{race_num}R 結果 (速報:展開のみ AI待機中...)",
+                            value=keiba_bot.strip_display_markers(early_text),
+                            height=300,
+                            key=f"res_early_{race_num}_{time.time()}"
+                        )
+                        st.divider()
+
+                elif e_type == "result":
+                    race_num = event.get("race_num")
+                    output_text = event.get("data_text", event.get("data", ""))
+                    output_html = event.get("data_html", "")
+                    
+                    st.session_state.results_cache[race_num] = {
+                        "text": output_text,
+                        "html": output_html
+                    }
+                    
+                    with result_container:
+                        st.subheader(f"{selected_place} {race_num}R")
+                        st.text_area(
+                            label=f"{race_num}R 結果 (速報)",
+                            value=keiba_bot.strip_display_markers(output_text),
+                            height=500,
+                            key=f"res_live_{race_num}"
+                        )
+                        if output_html:
+                            st.download_button(
+                                label=f"📥 {race_num}R HTMLをダウンロード",
+                                data=output_html,
+                                file_name=f"{year}{month}{day}_{selected_place}{race_num}R.html",
+                                mime="text/html",
+                                key=f"dl_live_{race_num}"
+                            )
+                        st.divider()
+                    
+                    status_area.success(f"✅ {race_num}R 完了")
+
+            if st.session_state.failed_races:
+                failed_list = sorted(st.session_state.failed_races)
+                status_area.warning(f"⚠️ 完了（{len(failed_list)}レースでエラー: {', '.join([f'{r}R' for r in failed_list])}）画面更新後にリトライできます")
+            else:
+                status_area.success("✅ 全ての処理が完了しました！画面を更新してまとめを表示します...")
+            time.sleep(2)
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"予期せぬエラーが発生しました:\n{e}")
+            st.code(traceback.format_exc())
+
+if __name__ == "__main__":
+    main()
