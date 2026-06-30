@@ -285,11 +285,6 @@ function renderEval() {
   const wrap = document.createElement("div");
   wrap.className = "eval-panel";
 
-  const head = document.createElement("div");
-  head.className = "eval-head";
-  head.innerHTML = `<strong>${escapeHtml(race.race_num)}R 評価一覧</strong><span>${escapeHtml(race.race_name || "")}</span>`;
-  wrap.appendChild(head);
-
   const lines = text.split("\n").map((line) => line.replace(/^【評価一覧】\s*/, "")).filter((line) => line.trim());
   for (const line of lines) {
     const row = document.createElement("div");
@@ -730,7 +725,14 @@ function setStatus(text) {
 function summaryLine() {
   const race = state.raceDetail?.race;
   if (!race) return "待機中";
-  return `${formatDate(race.date)} ${race.place_name}${race.race_num}R${race.post_time ? ` ${race.post_time}発走` : ""}`;
+  const dist = race.course || (race.dist ? `${race.dist}m` : "");
+  const parts = [
+    `${race.place_name}${race.race_num}R`,
+    race.race_name || "",
+    dist,
+    race.post_time ? `${race.post_time}発走` : "",
+  ].filter(Boolean);
+  return parts.join("  ");
 }
 
 function formatDate(value) {

@@ -7362,6 +7362,10 @@ def predict_pace_python(horses_data, danwa_data, current_distance_str, horse_pat
             if distance_extension and (must_lead or p.get("wants_lead") or p["est_pos"] <= 3.5):
                 final_speed += 0.6
 
+            # ★/☆（逃げ好走★ or 逃げ経験☆）馬はテン速度指数を+2底上げし、先手・前付けを後押しする。
+            if p.get("has_lead_good_record") or p.get("has_lead_exp"):
+                final_speed += 2.0
+
             p["speed_avg"] = final_speed
             p["raw_speed_avg"] = base_speed
             p["raw_speed_max"] = max_speed
@@ -7703,20 +7707,19 @@ def predict_pace_python(horses_data, danwa_data, current_distance_str, horse_pat
     
     tenkai_text = f"【展開予想】\n"
     tenkai_text += f"◆ペース予想：{pace_abbrev}：{explanation}\n\n"
+    tenkai_text += f"◆想定隊列順: \n{' '.join(formation_parts)}\n\n"
     tenkai_text += f"◆ハナ・先行候補：{leaders}\n"
-    
+
     for label in ["逃げ", "先行", "中団"]:
         if pos_groups[label]:
             if label in ("逃げ", "先行"):
                 tenkai_text += f"◆{label}候補：\n" + "\n".join(pos_groups[label]) + "\n"
             else:
                 tenkai_text += f"◆{label}候補：{' / '.join(pos_groups[label])}\n"
-    
+
     if speeds_log:
         tenkai_text += f"◆先手候補テン速度\n"
         tenkai_text += "\n".join(speeds_log) + "\n"
-    
-    tenkai_text += f"\n◆想定隊列順: \n{' '.join(formation_parts)}\n"
     
     # 展開加点①: S/Mペース(前残り想定)の時だけ、前5頭以内(est_pos上位5頭)に+5。
     pace_bonus_map = {}
