@@ -1582,11 +1582,15 @@ DATA_DIR = "2025data"
 JOCKEY_FILE = os.path.join(DATA_DIR, "2025_NARJockey.csv")
 TRAINER_FILE = os.path.join(DATA_DIR, "2025_NankanTrainer.csv")
 POWER_FILE = os.path.join(DATA_DIR, "2025_騎手パワー.xlsx")
-SCORE_POLICY_VERSION = "v20260701_chokyo_same_day_course_top3"
+SCORE_POLICY_VERSION = "v20260701b_chokyo_graduated_capped"
 
 # 当日各コース横断の調教上位(赤字)への加点。
 # 今走調教(中間追い切り含む)だけを対象に、同日・同じ調教場所・同じメトリクスで10頭以上いる場合のみ、3位以内を対象。
-CHOKYO_TOP_BONUS = 5
+# 配点は順位別: 1位+5 / 2位+3 / 3位+2。複数本の追い切りで複数グループの上位に入った場合は
+# 各グループの点を合算するが、合計の上限は +8 (3本とも1位でも +15 にはしない)。同タイムは同順位=同点。
+CHOKYO_TOP_POINTS = {1: 5, 2: 3, 3: 2}
+CHOKYO_TOP_BONUS_CAP = 8
+CHOKYO_TOP_BONUS = 5  # 1位の点(互換用)
 CHOKYO_TOP_MIN_GROUP_SIZE = 10
 
 # ==================================================
@@ -1927,39 +1931,59 @@ def _training_threshold(table, course, is_main_track):
 
 
 def _compute_day_chokyo_red(entries):
-    """当日生成した全レースを横断し、同一(日付・調教コース・メトリクス)グループ内でタイムが速い順に順位付け。
-    同一グループ10頭以上の時だけ対象。
-    3位以内を「調教上位(赤字＋加点)」とする。
-    entries: [{r_num, umaban, key, time, disp, line}] / key=(date,(course,is_main),metric)
-    Returns: {(r_num, umaban): {"rank": rank, "total": group_size, "line": line, "disp": disp}}"""
+    """当日生成した全レースを横断し、同一(日付・調教コース・メトリクス)グループ内で
+    負荷補正タイム(adj_time)が速い順に順位付け。同一グループ10頭以上の時だけ対象。
+    配点は 1位+5/2位+3/3位+2。同タイム(adj_time一致)は同順位=同点(競争順位: 自分より速い頭数+1)。
+    1頭が複数本の追い切りで複数グループの上位に入った時は各グループの点を合算するが、
+    同一セッション(同日・同コース)の1F/3F重複は最良の1つに集約し、合計の上限は +8。
+    entries: [{r_num, umaban, key, time, adj_time, disp, line}] / key=(date,(course,is_main),metric)
+    Returns: {(r_num, umaban): {"rank": best_rank, "total": group_size, "line", "disp",
+                                "time", "metric", "points": 合算後(最大8)の加点}}"""
     groups = {}
     for e in entries or []:
         if e.get("key") is None or e.get("time") is None:
             continue
         groups.setdefault(e["key"], []).append(e)
 
-    red = {}
-    for grp in groups.values():
+    def _adj(e):
+        return float(e.get("adj_time", e["time"]))
+
+    # 馬ごと: セッション(日付・コース)単位で最良ポイントの1件だけ残す(1F/3F重複の二重計上を防ぐ)。
+    # session_key = key[:2] = (date, (course, is_main))。
+    horse_sessions = {}  # (r_num, umaban) -> {session_key: (points, info)}
+    for key, grp in groups.items():
         group_size = len(grp)
         if group_size < CHOKYO_TOP_MIN_GROUP_SIZE:
             continue
-        # 負荷補正タイム(adj_time)でランク付け。未設定の古いエントリは実タイムで代替。
-        grp.sort(key=lambda e: (float(e.get("adj_time", e["time"])), int(e["r_num"]), int(e["umaban"])))
-        for i, e in enumerate(grp):
-            rank = i + 1
-            if rank <= 3:
-                k = (int(e["r_num"]), str(e["umaban"]))
-                info = {
-                    "rank": rank,
-                    "total": group_size,
-                    "line": e.get("line"),
-                    "disp": e.get("disp"),
-                    "time": e.get("time"),
-                    "metric": e.get("metric"),
-                }
-                old = red.get(k)
-                if not old or int(rank) < int(old.get("rank") or 99):
-                    red[k] = info
+        session_key = key[:2]
+        for e in grp:
+            # 競争順位(同タイム=同順位): 自分より adj_time が小さい(速い)頭数 + 1。
+            rank = 1 + sum(1 for o in grp if _adj(o) < _adj(e))
+            pts = CHOKYO_TOP_POINTS.get(rank, 0)
+            if pts <= 0:
+                continue
+            k = (int(e["r_num"]), str(e["umaban"]))
+            info = {
+                "rank": rank,
+                "total": group_size,
+                "line": e.get("line"),
+                "disp": e.get("disp"),
+                "time": e.get("time"),
+                "metric": e.get("metric"),
+            }
+            sess = horse_sessions.setdefault(k, {})
+            prev = sess.get(session_key)
+            if prev is None or pts > prev[0]:
+                sess[session_key] = (pts, info)
+
+    red = {}
+    for k, sess in horse_sessions.items():
+        total_points = min(CHOKYO_TOP_BONUS_CAP, sum(p for p, _ in sess.values()))
+        # 表示(N位/M頭)は最上位(rankが最小)のセッションを採用。
+        best_info = min((info for _, info in sess.values()), key=lambda i: int(i["rank"]))
+        out = dict(best_info)
+        out["points"] = total_points
+        red[k] = out
     return red
 
 
@@ -9106,51 +9130,61 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
             affected = sorted({rn for (rn, _ub) in red_ranks})
             if affected:
                 import store as _db
+                applied_races = 0
+                # 1レースの失敗で他レースの反映が巻き添えにならないよう、各レースを独立処理する。
                 for rn in affected:
-                    p = day_chokyo_pending.get(rn)
-                    if not p:
-                        continue
-                    red_here = {ub: info for (r2, ub), info in red_ranks.items() if r2 == rn}
-                    for ub, info in red_here.items():
-                        sd = p["scored_data"].get(ub) or p["scored_data"].get(str(ub))
-                        if sd is not None:
-                            if isinstance(info, dict):
-                                rk = info.get("rank")
-                                total = info.get("total")
-                            else:
-                                rk, total = info, None
-                            sd["score_chokyo_top"] = CHOKYO_TOP_BONUS
-                            sd["chokyo_red_rank"] = rk
-                            sd["chokyo_red_total"] = total
-                            if isinstance(info, dict) and info.get("disp"):
-                                sd["chokyo_rank_disp"] = info.get("disp")
-                    rb = _rebuild_race_with_chokyo(p, red_here)
-                    uma_ids_map = {h.get("name"): h.get("uma_id", "") for h in p["horses"].values() if h.get("name")}
                     try:
-                        with open(p["cache_file"], "w", encoding="utf-8") as f:
-                            json.dump({
-                                "data_text": rb["text"], "data_html": rb["html"],
-                                "ai_out_clean": rb["ai"], "grades": rb["grades"],
-                                "eval_list_text": rb["eval"], "score_policy": SCORE_POLICY_VERSION,
-                                "race_id": p["nk_id"], "course": p["current_course"],
-                                "dist": str(p["current_dist"]), "post_time": p["post_time"],
-                                "uma_ids": uma_ids_map,
-                            }, f, ensure_ascii=False)
-                    except Exception:
-                        pass
-                    try:
-                        _db.register_race(
-                            race_key=p["race_key"], date=f"{p['year']}{p['month']}{p['day']}",
-                            place_code=str(p["place_code"]), place_name=p["place_name"], race_num=int(p["r_num"]),
-                            race_id=p["nk_id"], course=p["current_course"], dist=str(p["current_dist"]),
-                            race_name=p["header1"].strip(), grades=rb["grades"],
-                            eval_list_text=rb["eval"], uma_ids=uma_ids_map, post_time=p["post_time"],
-                            data_html=rb["html"], data_text=rb["text"],
-                        )
-                    except Exception as _e2:
-                        print(f"  [調教上位] DB上書きスキップ {rn}R: {_e2}")
-                    yield {"type": "result", "race_num": p["r_num"], "data_text": rb["text"], "data_html": rb["html"]}
-                yield {"type": "status", "data": "🏇 当日各コースの調教上位(赤字＋加点)を反映しました"}
+                        p = day_chokyo_pending.get(rn)
+                        if not p:
+                            continue
+                        red_here = {ub: info for (r2, ub), info in red_ranks.items() if r2 == rn}
+                        for ub, info in red_here.items():
+                            sd = p["scored_data"].get(ub) or p["scored_data"].get(str(ub))
+                            if sd is not None:
+                                if isinstance(info, dict):
+                                    rk = info.get("rank")
+                                    total = info.get("total")
+                                    pts = info.get("points", CHOKYO_TOP_POINTS.get(int(rk or 99), 0))
+                                else:
+                                    rk, total, pts = info, None, CHOKYO_TOP_POINTS.get(int(info or 99), 0)
+                                sd["score_chokyo_top"] = pts
+                                sd["chokyo_red_rank"] = rk
+                                sd["chokyo_red_total"] = total
+                                if isinstance(info, dict) and info.get("disp"):
+                                    sd["chokyo_rank_disp"] = info.get("disp")
+                        rb = _rebuild_race_with_chokyo(p, red_here)
+                        uma_ids_map = {h.get("name"): h.get("uma_id", "") for h in p["horses"].values() if h.get("name")}
+                        try:
+                            with open(p["cache_file"], "w", encoding="utf-8") as f:
+                                json.dump({
+                                    "data_text": rb["text"], "data_html": rb["html"],
+                                    "ai_out_clean": rb["ai"], "grades": rb["grades"],
+                                    "eval_list_text": rb["eval"], "score_policy": SCORE_POLICY_VERSION,
+                                    "race_id": p["nk_id"], "course": p["current_course"],
+                                    "dist": str(p["current_dist"]), "post_time": p["post_time"],
+                                    "uma_ids": uma_ids_map,
+                                }, f, ensure_ascii=False)
+                        except Exception:
+                            pass
+                        try:
+                            _db.register_race(
+                                race_key=p["race_key"], date=f"{p['year']}{p['month']}{p['day']}",
+                                place_code=str(p["place_code"]), place_name=p["place_name"], race_num=int(p["r_num"]),
+                                race_id=p["nk_id"], course=p["current_course"], dist=str(p["current_dist"]),
+                                race_name=p["header1"].strip(), grades=rb["grades"],
+                                eval_list_text=rb["eval"], uma_ids=uma_ids_map, post_time=p["post_time"],
+                                data_html=rb["html"], data_text=rb["text"],
+                            )
+                        except Exception as _e2:
+                            print(f"  [調教上位] DB上書きスキップ {rn}R: {_e2}")
+                        applied_races += 1
+                        yield {"type": "result", "race_num": p["r_num"], "data_text": rb["text"], "data_html": rb["html"]}
+                    except Exception as _ern:
+                        import traceback
+                        print(f"  [調教上位] {rn}R 再描画スキップ: {_ern}")
+                        traceback.print_exc()
+                if applied_races:
+                    yield {"type": "status", "data": f"🏇 当日各コースの調教上位(赤字＋加点)を{applied_races}レースに反映しました"}
         except Exception as _e:
             print(f"  [調教上位] 反映スキップ: {_e}")
 
