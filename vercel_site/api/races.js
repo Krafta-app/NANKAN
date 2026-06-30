@@ -38,6 +38,7 @@ module.exports = async function handler(req, res) {
   try {
     const cutoffDate = dateDaysAgoJst(RACE_RETENTION_DAYS);
     await cleanupOldRaceData(cutoffDate);
+    const selectedDate = String(req.query.date || "");
 
     const query = {
       select:
@@ -46,7 +47,7 @@ module.exports = async function handler(req, res) {
       limit: "500",
       date: `gte.${cutoffDate}`,
     };
-    if (req.query.date) query.date = `eq.${req.query.date}`;
+    if (selectedDate) query.date = selectedDate >= cutoffDate ? `eq.${selectedDate}` : "eq.__expired__";
     if (req.query.place_code) query.place_code = `eq.${req.query.place_code}`;
     if (req.query.only_with_result === "1") query.has_result = "eq.1";
 
