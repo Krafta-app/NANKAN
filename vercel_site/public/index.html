@@ -19,7 +19,7 @@
           </div>
         </div>
         <div class="top-actions">
-          <label class="pin-box" id="pinBox">
+          <label class="pin-box" id="pinBox" hidden>
             <span>PIN</span>
             <input id="pinInput" type="password" inputmode="numeric" autocomplete="off" />
           </label>
@@ -28,7 +28,7 @@
       </header>
 
       <main>
-        <section class="control-band" aria-label="レース選択">
+        <section class="control-band" aria-label="開催選択">
           <label>
             <span>開催日</span>
             <select id="dateSelect"></select>
@@ -37,25 +37,30 @@
             <span>競馬場</span>
             <select id="placeSelect"></select>
           </label>
-          <div class="metric-strip" id="metricStrip"></div>
         </section>
 
         <section class="race-rail" id="raceRail" aria-label="レース一覧"></section>
 
         <section class="workspace">
-          <aside class="race-summary" id="raceSummary"></aside>
+          <aside class="eval-aside" id="raceSummary" aria-label="評価一覧"></aside>
 
           <section class="main-panel">
-            <nav class="tabs" aria-label="表示切替">
-              <button class="tab active" data-tab="prediction" type="button">予想</button>
-              <button class="tab" data-tab="result" type="button">結果</button>
+            <nav class="tabs" id="raceTabs" aria-label="表示切替">
+              <button class="tab active" data-tab="pace" type="button">展開</button>
+              <button class="tab" data-tab="index" type="button">相対評価</button>
+              <button class="tab" data-tab="ai" type="button">出走馬分析</button>
+              <button class="tab" data-tab="match" type="button">対戦表</button>
               <button class="tab" data-tab="memo" type="button">メモ</button>
+              <button class="tab" data-tab="result" type="button">結果</button>
               <button class="tab" data-tab="stats" type="button">成績</button>
             </nav>
 
-            <div class="tab-panel active" id="panelPrediction"></div>
-            <div class="tab-panel" id="panelResult"></div>
+            <div class="tab-panel active" id="panelPace"></div>
+            <div class="tab-panel" id="panelIndex"></div>
+            <div class="tab-panel" id="panelAi"></div>
+            <div class="tab-panel" id="panelMatch"></div>
             <div class="tab-panel" id="panelMemo"></div>
+            <div class="tab-panel" id="panelResult"></div>
             <div class="tab-panel" id="panelStats"></div>
           </section>
         </section>

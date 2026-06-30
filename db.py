@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS races (
     race_id        TEXT,            -- 16桁 nankan id (/result/{race_id}.do)
     course         TEXT,            -- 例: ダ1400m（外）
     dist           TEXT,            -- 例: 1400
+    post_time      TEXT,            -- 発走時刻 例: 20:10
     race_name      TEXT,
     grades_json    TEXT,            -- {馬名: tier}
     eval_list_text TEXT,            -- 【評価一覧】 A[2][5] ...
@@ -138,6 +139,10 @@ def init_db():
             c.execute("ALTER TABLE horse_notes ADD COLUMN pattern_json TEXT")
         except Exception:
             pass
+        try:
+            c.execute("ALTER TABLE races ADD COLUMN post_time TEXT")
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +151,8 @@ def init_db():
 def register_race(race_key, date, place_code, place_name, race_num,
                   race_id=None, course=None, dist=None, race_name=None,
                   grades=None, eval_list_text=None, uma_ids=None,
-                  generated_at=None, data_html=None, data_text=None):
+                  generated_at=None, data_html=None, data_text=None,
+                  post_time=None):
     """予想生成時/バックフィル時に races へ upsert。has_result は保持。
     data_html/data_text はローカルSQLiteでは未使用（アーカイブはcacheファイルを参照）。
     Supabaseバックエンドでのみ race_pages に保存される。"""
@@ -156,9 +162,9 @@ def register_race(race_key, date, place_code, place_name, race_num,
         c.execute(
             """
             INSERT INTO races (race_key, date, place_code, place_name, race_num,
-                               race_id, course, dist, race_name,
+                               race_id, course, dist, post_time, race_name,
                                grades_json, eval_list_text, uma_ids_json, generated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(race_key) DO UPDATE SET
                 date=excluded.date,
                 place_code=excluded.place_code,
@@ -167,6 +173,7 @@ def register_race(race_key, date, place_code, place_name, race_num,
                 race_id=COALESCE(excluded.race_id, races.race_id),
                 course=COALESCE(excluded.course, races.course),
                 dist=COALESCE(excluded.dist, races.dist),
+                post_time=COALESCE(excluded.post_time, races.post_time),
                 race_name=COALESCE(excluded.race_name, races.race_name),
                 grades_json=COALESCE(excluded.grades_json, races.grades_json),
                 eval_list_text=COALESCE(excluded.eval_list_text, races.eval_list_text),
@@ -174,7 +181,7 @@ def register_race(race_key, date, place_code, place_name, race_num,
                 generated_at=COALESCE(excluded.generated_at, races.generated_at)
             """,
             (race_key, date, place_code, place_name, race_num,
-             race_id, course, dist, race_name,
+             race_id, course, dist, post_time, race_name,
              grades_json, eval_list_text, uma_ids_json,
              generated_at or _now()),
         )
@@ -562,6 +569,7 @@ def backfill_from_cache():
             race_name=race_name, grades=grades,
             eval_list_text=d.get("eval_list_text"),
             uma_ids=d.get("uma_ids"), generated_at=generated_at,
+            post_time=d.get("post_time"),
         )
         n += 1
     return n

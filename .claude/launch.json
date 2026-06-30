@@ -6,6 +6,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "streamlit", "run", "main.py", "--server.headless=true", "--server.port=8501"],
       "port": 8501
+    },
+    {
+      "name": "vercel-static",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["vercel_site/static_server.js"],
+      "port": 8765
     }
   ]
 }

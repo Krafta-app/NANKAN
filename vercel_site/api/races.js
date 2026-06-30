@@ -15,7 +15,7 @@ module.exports = async function handler(req, res) {
   try {
     const query = {
       select:
-        "race_key,date,place_code,place_name,race_num,race_id,course,dist,race_name,grades_json,uma_ids_json,eval_list_text,generated_at,has_result",
+        "race_key,date,place_code,place_name,race_num,race_id,course,dist,post_time,race_name,grades_json,uma_ids_json,eval_list_text,generated_at,has_result",
       order: "date.desc,place_code.asc,race_num.asc",
       limit: "500",
     };

@@ -88,11 +88,13 @@ def init_db():
 def register_race(race_key, date, place_code, place_name, race_num,
                   race_id=None, course=None, dist=None, race_name=None,
                   grades=None, eval_list_text=None, uma_ids=None,
-                  generated_at=None, data_html=None, data_text=None):
+                  generated_at=None, data_html=None, data_text=None,
+                  post_time=None):
     row = {
         "race_key": race_key, "date": date, "place_code": str(place_code),
         "place_name": place_name, "race_num": int(race_num),
-        "race_id": race_id, "course": course, "dist": dist, "race_name": race_name,
+        "race_id": race_id, "course": course, "dist": dist, "post_time": post_time,
+        "race_name": race_name,
         "grades_json": json.dumps(grades, ensure_ascii=False) if grades is not None else None,
         "eval_list_text": eval_list_text,
         "uma_ids_json": json.dumps(uma_ids, ensure_ascii=False) if uma_ids is not None else None,
@@ -442,6 +444,7 @@ def backfill_from_cache():
             race_id=race_id, course=course, dist=dist, race_name=race_name,
             grades=d.get("grades"), eval_list_text=d.get("eval_list_text"),
             uma_ids=d.get("uma_ids"), data_html=d.get("data_html"), data_text=d.get("data_text"),
+            post_time=d.get("post_time"),
         )
         n += 1
     return n

@@ -96,6 +96,10 @@ h1 {
   gap: 8px;
 }
 
+.pin-box[hidden] {
+  display: none;
+}
+
 .pin-box {
   display: flex;
   align-items: center;
@@ -142,10 +146,10 @@ h1 {
 
 .control-band {
   display: grid;
-  grid-template-columns: 220px 180px 1fr;
+  grid-template-columns: 1fr 1fr;
   gap: 10px;
   align-items: end;
-  padding: 14px;
+  padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: rgba(255, 253, 250, 0.88);
@@ -248,7 +252,7 @@ select {
   align-items: start;
 }
 
-.race-summary,
+.eval-aside,
 .main-panel {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -256,10 +260,11 @@ select {
   box-shadow: var(--shadow);
 }
 
-.race-summary {
+.eval-aside {
   position: sticky;
   top: 12px;
-  padding: 14px;
+  align-self: start;
+  padding: 12px;
 }
 
 .summary-kicker {
@@ -1068,4 +1073,287 @@ textarea {
   .prediction-inline .inner-tab {
     flex-basis: 88px;
   }
+}
+
+/* ===== レース一覧ボタン（距離・発走時刻・メモ印） ===== */
+.race-button {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  min-width: 92px;
+  height: auto;
+  min-height: 58px;
+  padding: 7px 11px;
+}
+
+.race-button strong {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 15px;
+}
+
+.race-button .rb-meta {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.race-button .rb-state {
+  display: inline-block;
+  margin-top: 2px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--paper-2);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  width: fit-content;
+}
+
+.race-button .rb-state.done {
+  background: var(--green-2);
+  color: var(--green);
+}
+
+.race-button.has-memo {
+  border-color: var(--gold);
+  box-shadow: inset 0 0 0 1px var(--gold);
+}
+
+.race-button .memo-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--gold);
+}
+
+.race-button.active .memo-dot {
+  background: var(--wine);
+}
+
+/* ===== 評価一覧（左カラム常設・印つき） ===== */
+.eval-panel {
+  --s-color: #b98b00;
+  --a-color: #d54086;
+  --b-color: #cf3f12;
+  --c-color: #d06f00;
+  --d-color: #bd9c00;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.eval-head {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.eval-head strong {
+  display: block;
+  font-size: 14px;
+}
+
+.eval-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.eval-line {
+  padding: 6px 0;
+  font-family: "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif;
+  line-height: 2.1;
+  word-break: break-word;
+}
+
+.eval-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 8px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.eval-panel .mark-btn {
+  display: inline-grid;
+  min-width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1.5px solid #c9ced6;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  user-select: none;
+}
+
+.eval-panel .mark-btn:hover {
+  background: var(--paper-2);
+}
+
+.eval-panel .mark-btn[data-mark="◎"] {
+  border-color: #e74c3c;
+  color: #e74c3c;
+  font-weight: 900;
+}
+
+.eval-panel .mark-btn[data-mark="○"] {
+  border-color: #2196f3;
+  color: #2196f3;
+  font-weight: 900;
+}
+
+.eval-panel .mark-btn[data-mark="▲"] {
+  border-color: #ff9800;
+  color: #ff9800;
+  font-weight: 900;
+}
+
+.eval-panel .mark-btn[data-mark="△"] {
+  border-color: #4caf50;
+  color: #4caf50;
+}
+
+.eval-panel .mark-btn[data-mark="☆"] {
+  border-color: #795548;
+  color: #795548;
+}
+
+.eval-panel .mark-btn[data-mark="✓"] {
+  border-color: #00bcd4;
+  color: #00bcd4;
+}
+
+.eval-panel .mark-btn[data-mark="消"] {
+  border-color: #999;
+  color: #999;
+  text-decoration: line-through;
+}
+
+.eval-panel .rank-S {
+  color: var(--s-color);
+  font-size: 1.2em;
+  font-weight: 900;
+}
+
+.eval-panel .rank-A {
+  color: var(--a-color);
+  font-weight: 900;
+}
+
+.eval-panel .rank-B {
+  color: var(--b-color);
+  font-weight: 900;
+}
+
+.eval-panel .rank-C {
+  color: var(--c-color);
+  font-weight: 900;
+}
+
+.eval-panel .rank-D {
+  color: var(--d-color);
+  font-weight: 900;
+}
+
+.eval-panel .rank-E,
+.eval-panel .rank-F,
+.eval-panel .rank-G {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.memo-num {
+  padding: 0 1px;
+  border-radius: 3px;
+  background: var(--gold-2);
+  color: var(--wine);
+  font-weight: 900;
+}
+
+.eval-legend {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.eval-legend strong {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--gold-2);
+  color: var(--wine);
+}
+
+/* ===== 厩舎コメント下のメモ表示 ===== */
+.prediction-inline .memo-inline {
+  display: flex;
+  gap: 8px;
+  margin: 4px 0 10px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--gold);
+  border-radius: 4px;
+  background: var(--gold-2);
+}
+
+.prediction-inline .memo-inline-tag {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--wine);
+}
+
+.prediction-inline .memo-inline-text {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #4a3a1a;
+}
+
+/* ===== メモタブ上部の説明 ===== */
+.memo-hint {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper-2);
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.memo-hint b {
+  color: var(--ink);
+}
+
+/* ===== 印メニュー（評価以外のタブ共通） ===== */
+.app-mark-menu {
+  position: absolute;
+  z-index: 2000;
+  display: none;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 280px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+
+.app-mark-menu .mm-item {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #fff;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.app-mark-menu .mm-item:hover {
+  background: var(--paper-2);
 }

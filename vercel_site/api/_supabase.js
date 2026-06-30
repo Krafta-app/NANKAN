@@ -207,6 +207,7 @@ function compactRace(row) {
     race_id: row.race_id,
     course: row.course,
     dist: row.dist,
+    post_time: row.post_time || "",
     race_name: row.race_name,
     generated_at: row.generated_at,
     has_result: Number(row.has_result || 0) === 1,

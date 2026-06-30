@@ -11,6 +11,7 @@ create table if not exists races (
     race_id        text,
     course         text,
     dist           text,
+    post_time      text,
     race_name      text,
     grades_json    text,
     eval_list_text text,
@@ -47,6 +48,7 @@ create table if not exists horse_notes (
 );
 -- 既にテーブルがある場合の列追加（無ければ追加）
 alter table horse_notes add column if not exists pattern_json text;
+alter table races add column if not exists post_time text;
 
 create table if not exists horse_marks (
     race_key   text,

@@ -5424,6 +5424,17 @@ def parse_nankankeiba_detail(html, place_name, resources):
         data["meta"]["course"] = ""
         data["meta"]["dist"] = ""
 
+    # 発走時刻（"20:10発走" 等）。レイアウト変動に強いよう全体テキストから拾う。
+    data["meta"]["post_time"] = ""
+    try:
+        page_text = soup.get_text(" ", strip=True)
+        tm = (re.search(r'(\d{1,2}:\d{2})\s*発走', page_text)
+              or re.search(r'発走\s*[:：]?\s*(\d{1,2}:\d{2})', page_text))
+        if tm:
+            data["meta"]["post_time"] = tm.group(1)
+    except Exception:
+        pass
+
     shosai_area = soup.select_one("#shosai_aria")
     table = shosai_area.select_one("table.nk23_c-table22__table") if shosai_area else None
     if not table:
@@ -8753,6 +8764,7 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                                 "race_id": nk_id,
                                 "course": current_course,
                                 "dist": str(current_dist),
+                                "post_time": nk_data['meta'].get('post_time', ''),
                                 "uma_ids": uma_ids_map,
                             }, f, ensure_ascii=False)
                         # DB台帳へ登録（結果取得・アーカイブ・メモ連携用）。失敗しても生成は止めない。
@@ -8765,6 +8777,7 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                                 race_id=nk_id, course=current_course, dist=str(current_dist),
                                 race_name=header1.strip(), grades=grades,
                                 eval_list_text=eval_list_text, uma_ids=uma_ids_map,
+                                post_time=nk_data['meta'].get('post_time', ''),
                                 data_html=final_html, data_text=final_text,
                             )
                         except Exception as _e:

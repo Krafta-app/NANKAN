@@ -7,36 +7,40 @@ const state = {
   dates: [],
   places: [],
   raceDetail: null,
+  parsed: null,
+  notedUmaIds: new Set(),
   stats: null,
-  activeTab: "prediction",
+  activeTab: "pace",
   demo: new URLSearchParams(location.search).has("demo"),
 };
 
 const els = {};
 const PIN_KEY = "nankan_site_pin";
-let predictionControlsAbort = null;
+
+const PLACE_FALLBACK = { "10": "大井", "11": "川崎", "12": "船橋", "13": "浦和" };
+const TAB_PANELS = {
+  pace: "panelPace",
+  index: "panelIndex",
+  ai: "panelAi",
+  match: "panelMatch",
+  memo: "panelMemo",
+  result: "panelResult",
+  stats: "panelStats",
+};
 
 document.addEventListener("DOMContentLoaded", () => {
   cacheElements();
   bindEvents();
+  ensureMarkMenu();
   void boot();
 });
 
 function cacheElements() {
   for (const id of [
-    "statusLine",
-    "pinBox",
-    "pinInput",
-    "refreshButton",
-    "dateSelect",
-    "placeSelect",
-    "metricStrip",
-    "raceRail",
-    "raceSummary",
-    "panelPrediction",
-    "panelResult",
-    "panelMemo",
-    "panelStats",
+    "statusLine", "pinBox", "pinInput", "refreshButton",
+    "dateSelect", "placeSelect", "raceRail", "raceSummary",
+    "panelPace", "panelIndex", "panelAi", "panelMatch",
+    "panelMemo", "panelResult", "panelStats",
   ]) {
     els[id] = document.getElementById(id);
   }
@@ -59,10 +63,8 @@ function bindEvents() {
     localStorage.setItem(PIN_KEY, els.pinInput.value.trim());
   });
 
-  document.querySelectorAll(".tab").forEach((button) => {
-    button.addEventListener("click", () => {
-      showTab(button.dataset.tab);
-    });
+  document.querySelectorAll("#raceTabs .tab").forEach((button) => {
+    button.addEventListener("click", () => showTab(button.dataset.tab));
   });
 }
 
@@ -70,17 +72,17 @@ async function boot() {
   setStatus("設定確認中");
   await loadConfig();
   renderPinState();
-
   if (!state.config?.configured && !state.demo) {
     renderSetupState();
     return;
   }
-
+  await loadAllNotes();
   await loadRaces();
 }
 
 async function refreshAll() {
   state.stats = null;
+  await loadAllNotes();
   await loadRaces(true);
   if (state.activeTab === "stats") await loadStats();
 }
@@ -95,6 +97,22 @@ async function loadConfig() {
   } catch (err) {
     state.config = { configured: false, memoEnabled: false, memoAuthRequired: false };
     showToast(`設定確認に失敗しました: ${err.message}`);
+  }
+}
+
+// 全メモを一度だけ取得し、レース一覧のメモ印・評価一覧の太字に使う uma_id 集合を作る。
+async function loadAllNotes() {
+  try {
+    const data = state.demo ? demoNotes("") : await apiGet("/api/notes?query=");
+    const ids = new Set();
+    for (const note of data.notes || []) {
+      const hasText = (note.note_text || "").trim();
+      const hasPattern = Object.values(note.pattern || parseJson(note.pattern_json) || {}).some(Boolean);
+      if (note.uma_id && (hasText || hasPattern)) ids.add(String(note.uma_id));
+    }
+    state.notedUmaIds = ids;
+  } catch {
+    state.notedUmaIds = new Set();
   }
 }
 
@@ -122,7 +140,6 @@ async function loadRaces(preserveRace = false) {
     state.races = data.races || [];
     state.places = data.places || [];
     renderFilters();
-    renderMetrics();
     renderRaceRail();
 
     if (!preserveRace || !state.races.some((race) => race.race_key === state.currentRaceKey)) {
@@ -132,6 +149,7 @@ async function loadRaces(preserveRace = false) {
       await loadRace(state.currentRaceKey);
     } else {
       state.raceDetail = null;
+      state.parsed = null;
       renderAllPanels();
       setStatus("対象レースなし");
     }
@@ -145,18 +163,19 @@ async function loadRace(raceKey) {
   state.currentRaceKey = raceKey;
   renderRaceRail();
   setStatus("レース詳細読込中");
-  renderLoading(els.panelPrediction, "予想を読み込み中");
+  renderLoading(els.raceSummary, "予想を読み込み中");
 
   try {
     state.raceDetail = state.demo ? demoRace(raceKey) : await apiGet(`/api/race?race_key=${encodeURIComponent(raceKey)}`);
-    renderMetrics();
+    state.parsed = parsePrediction(state.raceDetail);
     renderAllPanels();
     setStatus(summaryLine());
   } catch (err) {
     state.raceDetail = null;
+    state.parsed = null;
     renderAllPanels();
     setStatus("読込エラー");
-    renderEmpty(els.panelPrediction, "レース詳細を取得できません", err.message);
+    renderEmpty(els.raceSummary, "レース詳細を取得できません", err.message);
   }
 }
 
@@ -178,40 +197,65 @@ async function loadStats() {
   }
 }
 
+// ---- data_html から各セクションを取り出し、馬番↔uma_id↔メモ の対応表を作る ----
+function parsePrediction(detail) {
+  const html = detail?.page?.data_html || "";
+  const race = detail?.race || {};
+  const notes = detail?.notes || {};
+  const patterns = detail?.patterns || {};
+
+  const result = {
+    evalText: race.eval_list_text || "",
+    paceEl: null, indexEl: null, aiEl: null, matchEl: null,
+    umaMap: {},          // umaban -> { name, uma_id, noteText }
+    notedUmaban: new Set(),
+    markCtx: { markPrefix: `${race.date || ""}_${race.place_name || ""}_`, raceNum: String(race.race_num || "") },
+  };
+  if (!html) return result;
+
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  result.paceEl = doc.querySelector("#tab-pace");
+  result.indexEl = doc.querySelector("#tab-index");
+  result.aiEl = doc.querySelector("#tab-ai");
+  result.matchEl = doc.querySelector("#tab-match");
+
+  // 名前 -> uma_id の正規化辞書（出馬表の uma_ids から）
+  const byNorm = {};
+  for (const [name, umaId] of Object.entries(race.uma_ids || {})) {
+    byNorm[normName(name)] = umaId;
+  }
+
+  // 出走馬分析の各見出しから 馬番→馬名 を取り、uma_id・メモへ橋渡し。
+  if (result.aiEl) {
+    for (const header of result.aiEl.querySelectorAll(".horse-header")) {
+      const umaban = header.querySelector(".mark-btn")?.dataset.uma;
+      if (!umaban) continue;
+      const span = header.querySelector("span:not(.mark-btn)") || header;
+      const raw = (span.textContent || "").trim();
+      const name = raw.replace(/^[①-⑳]/, "").replace(/^\[\d{1,2}\]/, "").split(/[\s　]/)[0];
+      const umaId = byNorm[normName(name)] || "";
+      const noteText = (notes[umaId]?.note_text || "").trim();
+      const hasPattern = Object.values(patterns[umaId] || {}).some(Boolean);
+      result.umaMap[umaban] = { name, uma_id: umaId, noteText };
+      if (noteText || hasPattern) result.notedUmaban.add(String(umaban));
+    }
+  }
+  return result;
+}
+
 function renderFilters() {
   fillSelect(
     els.dateSelect,
     state.dates.map((date) => ({ value: date, label: formatDate(date) })),
     state.currentDate,
   );
-
-  const allPlaces = Object.entries(state.config?.placeByCode || {
-    "10": "大井",
-    "11": "川崎",
-    "12": "船橋",
-    "13": "浦和",
-  }).map(([value, label]) => ({ value, label }));
+  const allPlaces = Object.entries(state.config?.placeByCode || PLACE_FALLBACK).map(([value, label]) => ({ value, label }));
   fillSelect(els.placeSelect, [{ value: "", label: "すべて" }, ...allPlaces], state.currentPlace);
 }
 
-function renderMetrics() {
-  const resultCount = state.races.filter((race) => race.has_result).length;
-  const horses = state.raceDetail?.horses || [];
-  const memoCount = horses.filter((horse) => state.raceDetail?.notes?.[horse.uma_id]?.note_text).length;
-  const items = [
-    ["レース", state.races.length],
-    ["結果済", resultCount],
-    ["出走馬", horses.length || "-"],
-    ["メモ", memoCount || 0],
-  ];
-  els.metricStrip.replaceChildren(
-    ...items.map(([label, value]) => {
-      const box = document.createElement("div");
-      box.className = "metric";
-      box.innerHTML = `<b>${escapeHtml(value)}</b><span>${escapeHtml(label)}</span>`;
-      return box;
-    }),
-  );
+function raceHasMemo(race) {
+  const ids = Object.values(race.uma_ids || {});
+  return ids.some((id) => state.notedUmaIds.has(String(id)));
 }
 
 function renderRaceRail() {
@@ -219,13 +263,19 @@ function renderRaceRail() {
     renderEmpty(els.raceRail, "該当レースなし", "Macで予想生成後、Supabaseへ同期されると表示されます。");
     return;
   }
-
   els.raceRail.replaceChildren(
     ...state.races.map((race) => {
       const button = document.createElement("button");
       button.type = "button";
-      button.className = `race-button${race.race_key === state.currentRaceKey ? " active" : ""}`;
-      button.innerHTML = `<strong>${race.race_num}R</strong><span>${race.has_result ? "結果済" : "予想"}</span>`;
+      const active = race.race_key === state.currentRaceKey;
+      const memo = raceHasMemo(race);
+      button.className = `race-button${active ? " active" : ""}${memo ? " has-memo" : ""}`;
+      const meta = [race.dist ? `${race.dist}m` : "", race.post_time || ""].filter(Boolean).join(" · ");
+      button.innerHTML = `
+        <strong>${escapeHtml(race.race_num)}R${memo ? '<i class="memo-dot" title="メモ有り"></i>' : ""}</strong>
+        <span class="rb-meta">${escapeHtml(meta || "—")}</span>
+        <span class="rb-state ${race.has_result ? "done" : ""}">${race.has_result ? "結果" : "予想"}</span>
+      `;
       button.addEventListener("click", () => void loadRace(race.race_key));
       return button;
     }),
@@ -233,296 +283,219 @@ function renderRaceRail() {
 }
 
 function renderAllPanels() {
-  renderSummary();
-  renderPrediction();
-  renderResult();
+  renderEval();
+  renderSection(els.panelPace, state.parsed?.paceEl, "展開");
+  renderSection(els.panelIndex, state.parsed?.indexEl, "相対評価");
+  renderAi();
+  renderSection(els.panelMatch, state.parsed?.matchEl, "対戦表");
   renderMemo();
+  renderResult();
   if (state.activeTab === "stats") void loadStats();
 }
 
-function renderSummary() {
-  const detail = state.raceDetail;
-  if (!detail?.race) {
+// 評価一覧を左カラムに常設表示。各馬番に予想印（◎○▲…）ボタンを付ける。
+function renderEval() {
+  const parsed = state.parsed;
+  const race = state.raceDetail?.race;
+  if (!race) {
     renderEmpty(els.raceSummary, "レース未選択", "日付と競馬場を選んでください。");
     return;
   }
-  const race = detail.race;
-  const horses = detail.horses || [];
-  const tierCounts = horses.reduce((acc, horse) => {
-    const tier = horse.tier || "不明";
-    acc[tier] = (acc[tier] || 0) + 1;
-    return acc;
-  }, {});
-
-  els.raceSummary.replaceChildren();
-  const wrapper = document.createElement("div");
-  wrapper.innerHTML = `
-    <div class="summary-kicker">${escapeHtml(formatDate(race.date))} ${escapeHtml(race.place_name || "")}</div>
-    <div class="summary-title">${escapeHtml(race.race_num)}R ${escapeHtml(race.race_name || "")}</div>
-    <div class="summary-meta">
-      <div><span>距離</span><b>${escapeHtml(race.course || (race.dist ? `${race.dist}m` : "-"))}</b></div>
-      <div><span>状態</span><b>${race.has_result ? "結果取得済" : "予想保存済"}</b></div>
-      <div><span>生成</span><b>${escapeHtml(shortDateTime(race.generated_at) || "-")}</b></div>
-    </div>
-    <div class="tier-cloud"></div>
-  `;
-  const cloud = wrapper.querySelector(".tier-cloud");
-  for (const [tier, count] of Object.entries(tierCounts)) {
-    const badge = document.createElement("span");
-    badge.className = `badge${["S", "A", "主力", "一軍"].includes(tier) ? " good" : ""}`;
-    badge.textContent = `${tier} ${count}`;
-    cloud.appendChild(badge);
-  }
-  els.raceSummary.appendChild(wrapper);
-}
-
-function renderPrediction() {
-  const detail = state.raceDetail;
-  if (!detail?.race) {
-    renderEmpty(els.panelPrediction, "予想なし", "レースを選んでください。");
+  const text = parsed?.evalText || "";
+  if (!text) {
+    renderEmpty(els.raceSummary, "評価一覧なし", "予想の評価一覧が保存されていません。");
     return;
   }
-  const html = detail.page?.data_html || "";
-  const text = detail.page?.data_text || "";
-  els.panelPrediction.replaceChildren();
+  const noted = parsed.notedUmaban;
+  const wrap = document.createElement("div");
+  wrap.className = "eval-panel";
 
-  if (html) {
-    const wrap = document.createElement("div");
-    wrap.className = "prediction-viewer";
+  const head = document.createElement("div");
+  head.className = "eval-head";
+  head.innerHTML = `<strong>${escapeHtml(race.race_num)}R 評価一覧</strong><span>${escapeHtml(race.race_name || "")}</span>`;
+  wrap.appendChild(head);
 
-    const toolbar = document.createElement("div");
-    toolbar.className = "prediction-toolbar";
-    toolbar.innerHTML = `
-      <div>
-        <strong>${escapeHtml(detail.race.place_name || "")}${escapeHtml(detail.race.race_num)}R 予想</strong>
-        <span>${escapeHtml(detail.race.race_name || "")}</span>
-      </div>
-      <div class="prediction-actions"></div>
-    `;
+  const lines = text.split("\n").map((line) => line.replace(/^【評価一覧】\s*/, "")).filter((line) => line.trim());
+  for (const line of lines) {
+    const row = document.createElement("div");
+    row.className = "eval-line";
+    row.innerHTML = evalLineHtml(line, noted);
+    wrap.appendChild(row);
+  }
 
-    const actions = toolbar.querySelector(".prediction-actions");
-    const focusButton = makeToolButton("集中", "予想だけ大きく見る");
-    const openButton = makeToolButton("別窓", "別ウィンドウで開く");
-    const downloadButton = makeToolButton("HTML保存", "HTMLを保存する");
-    actions.append(focusButton, openButton, downloadButton);
+  if (noted.size) {
+    const legend = document.createElement("div");
+    legend.className = "eval-legend";
+    legend.innerHTML = `<strong>太字の馬番</strong>＝メモ登録あり（${noted.size}頭）`;
+    wrap.appendChild(legend);
+  }
 
-    const inline = document.createElement("div");
-    inline.className = "prediction-inline";
-    renderInlinePredictionHtml(inline, html, detail.race);
+  els.raceSummary.replaceChildren(wrap);
+  bindMarks(wrap);
+}
 
-    focusButton.addEventListener("click", () => {
-      wrap.classList.toggle("is-focus");
-      document.body.classList.toggle("prediction-focus-open", wrap.classList.contains("is-focus"));
-      focusButton.textContent = wrap.classList.contains("is-focus") ? "戻る" : "集中";
-    });
-    openButton.addEventListener("click", () => openPredictionHtml(html));
-    downloadButton.addEventListener("click", () => downloadPredictionHtml(detail.race, html));
+function evalLineHtml(line, noted) {
+  let h = escapeHtml(line);
+  // 先にランク文字を着色（馬番[N]の直前のS/A/B…を拾う）。
+  h = h.replace(/(^|[\s　])([SABCDEFG])(?=\[|[\s　]|$)/g, (m, pre, r) => `${pre}<span class="rank-${r}">${r}</span>`);
+  // 各馬番[N]の前に印ボタンを差し込み、メモ有りなら太字化。
+  h = h.replace(/\[(\d{1,2})\]/g, (m, n) => {
+    const num = noted.has(String(n)) ? `<strong class="memo-num">[${n}]</strong>` : `[${n}]`;
+    return `<span class="eval-chip"><span class="mark-btn" data-uma="${n}"></span>${num}</span>`;
+  });
+  return h;
+}
 
-    wrap.append(toolbar, inline);
-    els.panelPrediction.appendChild(wrap);
-  } else if (text) {
-    const pre = document.createElement("pre");
-    pre.className = "text-fallback";
-    pre.textContent = text;
-    els.panelPrediction.appendChild(pre);
-  } else {
-    renderEmpty(els.panelPrediction, "予想HTMLなし", "race_pages に data_html が保存されていません。");
+// 展開・相対評価・対戦表: data_html のセクションをそのまま流し込み、印ボタンを有効化。
+function renderSection(panel, sourceEl, label) {
+  if (!state.raceDetail?.race) {
+    renderEmpty(panel, `${label}なし`, "レースを選んでください。");
+    return;
+  }
+  if (!sourceEl) {
+    renderEmpty(panel, `${label}なし`, "このレースには該当データがありません。");
+    return;
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "prediction-inline";
+  for (const node of [...sourceEl.children]) {
+    wrap.appendChild(document.importNode(node, true));
+  }
+  cleanupInline(wrap);
+  bindMarks(wrap);
+  panel.replaceChildren(wrap);
+}
+
+function renderAi() {
+  const panel = els.panelAi;
+  const parsed = state.parsed;
+  if (!state.raceDetail?.race) {
+    renderEmpty(panel, "出走馬分析なし", "レースを選んでください。");
+    return;
+  }
+  if (!parsed?.aiEl) {
+    renderEmpty(panel, "出走馬分析なし", "このレースには該当データがありません。");
+    return;
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "prediction-inline";
+  for (const node of [...parsed.aiEl.children]) {
+    wrap.appendChild(document.importNode(node, true));
+  }
+  cleanupInline(wrap);
+  injectMemos(wrap, parsed);
+  bindMarks(wrap);
+  panel.replaceChildren(wrap);
+}
+
+// 各馬の厩舎コメント（「…」行）の直下にメモ内容を差し込む。
+function injectMemos(root, parsed) {
+  const container = root.querySelector(".content-box > div") || root.querySelector(".content-box") || root;
+  let umaban = null;
+  for (const node of [...container.childNodes]) {
+    if (node.nodeType === 1 && node.classList?.contains("horse-header")) {
+      umaban = node.querySelector(".mark-btn")?.dataset.uma || null;
+      continue;
+    }
+    // 厩舎コメント（chokyo-label）の直前で差し込む = 「厩舎の話の下」
+    if (node.nodeType === 1 && node.classList?.contains("chokyo-label") && umaban) {
+      const info = parsed.umaMap[umaban];
+      if (info?.noteText) {
+        const box = document.createElement("div");
+        box.className = "memo-inline";
+        box.innerHTML = `<span class="memo-inline-tag">📝 メモ</span><span class="memo-inline-text">${escapeHtml(info.noteText).replace(/\n/g, "<br>")}</span>`;
+        container.insertBefore(box, node);
+      }
+      umaban = null;
+    }
   }
 }
 
-function renderInlinePredictionHtml(target, html, race) {
-  if (predictionControlsAbort) predictionControlsAbort.abort();
-  predictionControlsAbort = new AbortController();
-
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  const scriptText = [...doc.querySelectorAll("script")].map((script) => script.textContent || "").join("\n");
-  const markPrefix = parseScriptValue(scriptText, /MARK_PREFIX\s*=\s*'([^']*)'/) || "";
-  const singleRaceNum = parseScriptValue(scriptText, /keiba_mark_([^'"+]+)_/) || race?.race_num || "";
-
-  target.replaceChildren();
-  for (const node of [...doc.body.childNodes]) {
-    if (node.nodeName.toLowerCase() === "script" || node.nodeName.toLowerCase() === "style") continue;
-    target.appendChild(document.importNode(node, true));
-  }
-  target.querySelectorAll("style,script").forEach((node) => node.remove());
-  target.querySelectorAll("[onclick]").forEach((node) => {
+function cleanupInline(root) {
+  root.querySelectorAll("style, script").forEach((node) => node.remove());
+  root.querySelectorAll("[onclick]").forEach((node) => {
     node.dataset.originalOnclick = node.getAttribute("onclick") || "";
     node.removeAttribute("onclick");
   });
-  target.querySelectorAll("a[href]").forEach((link) => {
+  root.querySelectorAll("a[href]").forEach((link) => {
     link.target = "_blank";
     link.rel = "noopener";
   });
-
-  bindInlinePredictionControls(target, {
-    markPrefix,
-    singleRaceNum: String(singleRaceNum),
-    raceNum: String(race?.race_num || singleRaceNum || ""),
-    signal: predictionControlsAbort.signal,
-  });
 }
 
-function bindInlinePredictionControls(root, context) {
-  root.querySelectorAll(".tab-button").forEach((button) => {
-    const tabName = inlineCallArg(button, /openTab\([^,]+,\s*'([^']+)'/) || tabIdFromButton(button);
-    if (!tabName) return;
-    button.addEventListener("click", (event) => openInlineTab(root, event.currentTarget, tabName, context.raceNum), {
-      signal: context.signal,
+// ---------- 印（◎○▲…）ボタン: 単体予想HTMLと同じ localStorage キーで保存 ----------
+function ensureMarkMenu() {
+  if (els.markMenu) return;
+  const menu = document.createElement("div");
+  menu.className = "app-mark-menu";
+  menu.id = "appMarkMenu";
+  for (const mark of ["◎", "○", "▲", "△", "☆", "✓", "消", ""]) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "mm-item";
+    item.textContent = mark || "✕";
+    item.dataset.markValue = mark;
+    item.addEventListener("click", (event) => {
+      event.stopPropagation();
+      applyMark(mark);
+    });
+    menu.appendChild(item);
+  }
+  document.body.appendChild(menu);
+  els.markMenu = menu;
+  document.addEventListener("click", hideMarkMenu);
+}
+
+function markKey(uma) {
+  const ctx = state.parsed?.markCtx || { markPrefix: "", raceNum: "" };
+  return `${ctx.markPrefix}keiba_mark_${ctx.raceNum}_${uma}`;
+}
+
+function bindMarks(root) {
+  root.querySelectorAll(".mark-btn").forEach((btn) => {
+    const uma = btn.dataset.uma;
+    const saved = uma ? localStorage.getItem(markKey(uma)) : "";
+    btn.textContent = saved || "";
+    btn.dataset.mark = saved || "";
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openMarkMenu(btn);
     });
   });
-
-  root.querySelectorAll(".race-tab").forEach((button) => {
-    const raceId = inlineCallArg(button, /openRace\([^,]+,\s*'([^']+)'/) || button.id?.replace(/^btn-/, "");
-    if (!raceId) return;
-    button.addEventListener("click", (event) => openInlineRace(root, event.currentTarget, raceId), {
-      signal: context.signal,
-    });
-  });
-
-  root.querySelectorAll(".inner-tab").forEach((button) => {
-    const tabId = inlineCallArg(button, /openInnerTab\([^,]+,\s*'([^']+)'/) || tabIdFromButton(button);
-    if (!tabId) return;
-    button.addEventListener("click", (event) => openInlineInnerTab(event.currentTarget, tabId), {
-      signal: context.signal,
-    });
-  });
-
-  root.querySelectorAll(".mark-btn").forEach((button) => {
-    button.addEventListener(
-      "click",
-      (event) => {
-        event.stopPropagation();
-        openInlineMarkMenu(root, event.currentTarget);
-      },
-      { signal: context.signal },
-    );
-  });
-
-  root.querySelectorAll("#mark-menu .menu-item").forEach((item) => {
-    const mark = item.textContent.trim() === "--" ? "" : item.textContent.trim().replace("✕", "");
-    item.addEventListener(
-      "click",
-      (event) => {
-        event.stopPropagation();
-        selectInlineMark(root, mark, context);
-      },
-      { signal: context.signal },
-    );
-  });
-
-  root.addEventListener("click", () => closeInlineMarkMenu(root), { signal: context.signal });
-  restoreInlineTabs(root, context);
-  syncInlineMarks(root, context);
 }
 
-function openInlineTab(root, button, tabName, raceNum) {
-  root.querySelectorAll(".tab-content").forEach((content) => content.classList.remove("active"));
-  root.querySelectorAll(".tab-button").forEach((tabButton) => tabButton.classList.remove("active"));
-  root.querySelector(`#${cssEscape(tabName)}`)?.classList.add("active");
-  button.classList.add("active");
-  if (raceNum) localStorage.setItem(`keiba_active_tab_${raceNum}`, tabName);
-}
-
-function openInlineRace(root, button, raceId) {
-  root.querySelectorAll(".race-content").forEach((content) => content.classList.remove("active"));
-  root.querySelectorAll(".race-tab").forEach((tabButton) => tabButton.classList.remove("active"));
-  root.querySelector(`#${cssEscape(raceId)}`)?.classList.add("active");
-  button.classList.add("active");
-  localStorage.setItem("keiba_combined_race", raceId);
-}
-
-function openInlineInnerTab(button, tabId) {
-  const parent = button.closest(".race-content");
-  if (!parent) return;
-  parent.querySelectorAll(".inner-content").forEach((content) => content.classList.remove("active"));
-  parent.querySelectorAll(".inner-tab").forEach((tabButton) => tabButton.classList.remove("active"));
-  parent.querySelector(`#${cssEscape(tabId)}`)?.classList.add("active");
-  button.classList.add("active");
-  localStorage.setItem(`keiba_inner_${parent.id}`, tabId);
-}
-
-function openInlineMarkMenu(root, button) {
-  const menu = root.querySelector("#mark-menu");
-  if (!menu) return;
-  root.querySelectorAll(".mark-btn.current").forEach((item) => item.classList.remove("current"));
-  button.classList.add("current");
-  const rect = button.getBoundingClientRect();
-  const maxLeft = Math.max(8, window.innerWidth - 292);
+function openMarkMenu(btn) {
+  ensureMarkMenu();
+  state.markTarget = btn;
+  const menu = els.markMenu;
+  const rect = btn.getBoundingClientRect();
   menu.style.display = "flex";
-  menu.style.top = `${rect.bottom + 6}px`;
-  menu.style.left = `${Math.max(8, Math.min(maxLeft, rect.left))}px`;
+  const width = 280;
+  let left = window.scrollX + rect.left;
+  if (left + width > window.scrollX + window.innerWidth) left = window.scrollX + window.innerWidth - width - 8;
+  menu.style.top = `${window.scrollY + rect.bottom + 6}px`;
+  menu.style.left = `${Math.max(8, left)}px`;
 }
 
-function selectInlineMark(root, mark, context) {
-  const button = root.querySelector(".mark-btn.current");
-  if (!button) return;
-  const raceNum = button.dataset.race || context.singleRaceNum || context.raceNum;
-  const uma = button.dataset.uma;
-  if (!raceNum || !uma) return;
-  const key = `${context.markPrefix}keiba_mark_${raceNum}_${uma}`;
-  if (mark) localStorage.setItem(key, mark);
-  else localStorage.removeItem(key);
-  syncInlineMarks(root, context);
-  closeInlineMarkMenu(root);
+function hideMarkMenu() {
+  if (els.markMenu) els.markMenu.style.display = "none";
 }
 
-function closeInlineMarkMenu(root) {
-  root.querySelectorAll(".mark-btn.current").forEach((item) => item.classList.remove("current"));
-  const menu = root.querySelector("#mark-menu");
-  if (menu) menu.style.display = "none";
+function applyMark(mark) {
+  const btn = state.markTarget;
+  if (!btn) return;
+  const uma = btn.dataset.uma;
+  if (mark) localStorage.setItem(markKey(uma), mark);
+  else localStorage.removeItem(markKey(uma));
+  syncMarks(uma, mark);
+  hideMarkMenu();
 }
 
-function syncInlineMarks(root, context) {
-  root.querySelectorAll(".mark-btn").forEach((button) => {
-    const raceNum = button.dataset.race || context.singleRaceNum || context.raceNum;
-    const uma = button.dataset.uma;
-    const saved = raceNum && uma ? localStorage.getItem(`${context.markPrefix}keiba_mark_${raceNum}_${uma}`) : "";
-    button.dataset.mark = saved || "";
-    button.textContent = saved || "";
+function syncMarks(uma, mark) {
+  document.querySelectorAll(`.mark-btn[data-uma="${cssEscape(uma)}"]`).forEach((btn) => {
+    btn.textContent = mark || "";
+    btn.dataset.mark = mark || "";
   });
-}
-
-function restoreInlineTabs(root, context) {
-  const savedTab = context.raceNum ? localStorage.getItem(`keiba_active_tab_${context.raceNum}`) : "";
-  const tabButton = savedTab ? findInlineButton(root, ".tab-button", savedTab) : root.querySelector(".tab-button.active");
-  if (tabButton) tabButton.click();
-
-  const savedRace = localStorage.getItem("keiba_combined_race");
-  const raceButton = savedRace ? findInlineButton(root, ".race-tab", savedRace) : root.querySelector(".race-tab.active, .race-tab");
-  if (raceButton) raceButton.click();
-
-  root.querySelectorAll(".race-content").forEach((raceContent) => {
-    const savedInner = localStorage.getItem(`keiba_inner_${raceContent.id}`);
-    const innerButton = savedInner
-      ? findInlineButton(raceContent, ".inner-tab", savedInner)
-      : raceContent.querySelector(".inner-tab.active, .inner-tab");
-    if (innerButton) innerButton.click();
-  });
-}
-
-function findInlineButton(root, selector, targetId) {
-  return [...root.querySelectorAll(selector)].find((button) => button.dataset.targetId === targetId || buttonMatchesArg(button, targetId));
-}
-
-function tabIdFromButton(button) {
-  return button.dataset.targetId || "";
-}
-
-function buttonMatchesArg(button, targetId) {
-  const text = button.getAttribute("data-original-onclick") || button.outerHTML;
-  return text.includes(`'${targetId}'`);
-}
-
-function inlineCallArg(node, pattern) {
-  const source = node.dataset.originalOnclick || node.getAttribute("onclick") || "";
-  const value = parseScriptValue(source, pattern);
-  if (value) node.dataset.targetId = value;
-  node.dataset.originalOnclick = source;
-  return value;
-}
-
-function parseScriptValue(text, pattern) {
-  return String(text || "").match(pattern)?.[1] || "";
 }
 
 function cssEscape(value) {
@@ -530,41 +503,28 @@ function cssEscape(value) {
   return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
 }
 
-function makeToolButton(label, title) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "tool-button";
-  button.textContent = label;
-  button.title = title;
-  return button;
-}
-
 function renderResult() {
+  const panel = els.panelResult;
   const detail = state.raceDetail;
   if (!detail?.race) {
-    renderEmpty(els.panelResult, "結果なし", "レースを選んでください。");
+    renderEmpty(panel, "結果なし", "レースを選んでください。");
     return;
   }
   if (!detail.race.has_result) {
-    renderEmpty(els.panelResult, "結果待ち", "レース後に結果取得が完了すると表示されます。");
+    renderEmpty(panel, "結果待ち", "レース後に結果取得が完了すると表示されます。");
     return;
   }
-
   const table = document.createElement("div");
   table.className = "table-wrap";
   table.innerHTML = `
     <table>
-      <thead>
-        <tr>
-          <th>着</th><th>馬番</th><th>馬名</th><th>予想</th><th>人気</th><th>着差</th><th>判定</th>
-        </tr>
-      </thead>
+      <thead><tr><th>着</th><th>馬番</th><th>馬名</th><th>予想</th><th>人気</th><th>着差</th><th>判定</th></tr></thead>
       <tbody></tbody>
     </table>
   `;
   const tbody = table.querySelector("tbody");
   for (const horse of detail.horses || []) {
-    const hit = isTopHit(horse) ? "的中" : "";
+    const hit = isTopHit(horse);
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${escapeHtml(horse.finish_rank || "-")}</td>
@@ -577,7 +537,7 @@ function renderResult() {
     `;
     tbody.appendChild(tr);
   }
-  els.panelResult.replaceChildren(table);
+  panel.replaceChildren(table);
 }
 
 function renderMemo() {
@@ -586,27 +546,31 @@ function renderMemo() {
     renderEmpty(els.panelMemo, "メモなし", "レースを選んでください。");
     return;
   }
-
   const container = document.createElement("div");
-  const current = document.createElement("div");
-  current.className = "memo-grid";
+
+  const hint = document.createElement("div");
+  hint.className = "memo-hint";
+  hint.innerHTML = "メモは今回の点数には影響しません。<b>好走パターン（◯/✕）は次走以降の採点に±5</b>として反映され、本文メモは出走馬分析の厩舎コメント下に表示されます。";
+  container.appendChild(hint);
+
+  const grid = document.createElement("div");
+  grid.className = "memo-grid";
   for (const horse of detail.horses || []) {
-    current.appendChild(createMemoCard(horse));
+    grid.appendChild(createMemoCard(horse));
   }
-  container.appendChild(current);
+  container.appendChild(grid);
 
   const search = document.createElement("div");
   search.className = "notes-search";
   search.innerHTML = `
     <div class="search-row">
-      <input id="noteSearchInput" type="search" placeholder="馬名検索" />
+      <input id="noteSearchInput" type="search" placeholder="馬名でメモ検索" />
       <button class="search-button" type="button">検索</button>
     </div>
     <div id="noteSearchResult"></div>
   `;
   const input = search.querySelector("input");
-  const button = search.querySelector("button");
-  button.addEventListener("click", () => void searchNotes(input.value));
+  search.querySelector("button").addEventListener("click", () => void searchNotes(input.value));
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter") void searchNotes(input.value);
   });
@@ -632,7 +596,7 @@ function createMemoCard(horse) {
 
   const textarea = document.createElement("textarea");
   textarea.value = note;
-  textarea.placeholder = "メモ";
+  textarea.placeholder = "メモ（次走時に厩舎コメント下へ表示）";
   card.appendChild(textarea);
 
   const patternBox = document.createElement("div");
@@ -690,12 +654,7 @@ async function saveMemo(horse, textarea, card, saveButton) {
       const response = await fetch("/api/notes", {
         method: "POST",
         headers,
-        body: JSON.stringify({
-          uma_id: horse.uma_id,
-          horse_name: horse.name,
-          note_text: textarea.value,
-          pattern,
-        }),
+        body: JSON.stringify({ uma_id: horse.uma_id, horse_name: horse.name, note_text: textarea.value, pattern }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || "保存に失敗しました");
@@ -703,17 +662,24 @@ async function saveMemo(horse, textarea, card, saveButton) {
 
     if (!state.raceDetail.notes) state.raceDetail.notes = {};
     if (!state.raceDetail.patterns) state.raceDetail.patterns = {};
+    const trimmed = textarea.value.trim();
     state.raceDetail.notes[horse.uma_id] = {
-      uma_id: horse.uma_id,
-      horse_name: horse.name,
-      note_text: textarea.value.trim(),
-      updated_at: new Date().toISOString(),
+      uma_id: horse.uma_id, horse_name: horse.name, note_text: trimmed, updated_at: new Date().toISOString(),
     };
     state.raceDetail.patterns[horse.uma_id] = pattern;
+
+    // メモ状態の即時反映（太字・厩舎コメント下メモ・一覧の印）
+    const hasMemo = trimmed || Object.values(pattern).some(Boolean);
+    if (hasMemo) state.notedUmaIds.add(String(horse.uma_id));
+    else state.notedUmaIds.delete(String(horse.uma_id));
+    state.parsed = parsePrediction(state.raceDetail);
+    renderEval();
+    renderAi();
+    renderRaceRail();
+
     saveButton.classList.add("saved");
     saveButton.textContent = "保存済";
     showToast(`${horse.name} を保存しました`);
-    renderMetrics();
   } catch (err) {
     saveButton.textContent = "再保存";
     showToast(err.message);
@@ -771,7 +737,6 @@ function renderStats() {
     renderEmpty(els.panelStats, "成績なし", "結果取得済みレースがまだありません。");
     return;
   }
-
   const wrap = document.createElement("div");
   wrap.className = "stat-grid";
 
@@ -810,24 +775,17 @@ function renderStats() {
     `;
     tbody.appendChild(tr);
   }
-
   wrap.append(bars, table);
   els.panelStats.replaceChildren(wrap);
 }
 
 function showTab(tab) {
   state.activeTab = tab;
-  document.querySelectorAll(".tab").forEach((button) => {
+  document.querySelectorAll("#raceTabs .tab").forEach((button) => {
     button.classList.toggle("active", button.dataset.tab === tab);
   });
   document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.remove("active"));
-  const map = {
-    prediction: els.panelPrediction,
-    result: els.panelResult,
-    memo: els.panelMemo,
-    stats: els.panelStats,
-  };
-  map[tab]?.classList.add("active");
+  document.getElementById(TAB_PANELS[tab])?.classList.add("active");
   if (tab === "stats") void loadStats();
 }
 
@@ -837,13 +795,12 @@ function renderPinState() {
 
 function renderSetupState() {
   setStatus("Vercel環境変数待ち");
-  els.metricStrip.replaceChildren();
   els.raceRail.replaceChildren();
   renderEmpty(els.raceSummary, "未設定", "SUPABASE_URL と SUPABASE_SERVICE_ROLE_KEY を入れてください。");
-  renderEmpty(els.panelPrediction, "接続待ち", "VercelのEnvironment Variables設定後、再デプロイすると表示されます。");
-  renderEmpty(els.panelResult, "結果なし", "接続後に表示されます。");
-  renderEmpty(els.panelMemo, "メモなし", "接続後に保存できます。");
-  renderEmpty(els.panelStats, "成績なし", "接続後に表示されます。");
+  renderEmpty(els.panelPace, "接続待ち", "VercelのEnvironment Variables設定後、再デプロイすると表示されます。");
+  for (const id of ["panelIndex", "panelAi", "panelMatch", "panelMemo", "panelResult", "panelStats"]) {
+    renderEmpty(els[id], "接続待ち", "Supabase接続後に表示されます。");
+  }
 }
 
 function renderLoading(target, message) {
@@ -864,9 +821,7 @@ function renderEmpty(target, title, message) {
 async function apiGet(path) {
   const response = await fetch(path, { headers: { Accept: "application/json" } });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok || data.ok === false) {
-    throw new Error(data.error || `HTTP ${response.status}`);
-  }
+  if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
 
@@ -889,7 +844,7 @@ function setStatus(text) {
 function summaryLine() {
   const race = state.raceDetail?.race;
   if (!race) return "待機中";
-  return `${formatDate(race.date)} ${race.place_name}${race.race_num}R`;
+  return `${formatDate(race.date)} ${race.place_name}${race.race_num}R${race.post_time ? ` ${race.post_time}発走` : ""}`;
 }
 
 function formatDate(value) {
@@ -913,54 +868,15 @@ function isTopHit(horse) {
   return ["S", "A", "主力", "一軍"].includes(horse.tier) && Number(horse.finish_rank || 99) <= 3;
 }
 
-function enhancePredictionHtml(html) {
-  const style = `
-    <style>
-      html,body{margin:0;background:#fffdfa;color:#20221f;}
-      body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;line-height:1.55;}
-      table{max-width:100%;}
-      .container,.wrapper,main{max-width:100%!important;}
-      .tabs,.race-tabs,.inner-tabs{position:sticky!important;top:0;z-index:20;}
-      button,.tab,.race-tab,.inner-tab{min-height:34px;}
-      @media (max-width: 720px){
-        body{font-size:14px;}
-        table{font-size:13px;}
-        .tabs,.race-tabs,.inner-tabs{overflow-x:auto;white-space:nowrap;}
-      }
-    </style>
-  `;
-  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${style}</head>`);
-  return `<!doctype html><html><head><meta charset="utf-8">${style}</head><body>${html}</body></html>`;
-}
-
-function openPredictionHtml(html) {
-  const blob = new Blob([enhancePredictionHtml(html)], { type: "text/html;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  window.open(url, "_blank", "noopener,noreferrer");
-  setTimeout(() => URL.revokeObjectURL(url), 30000);
-}
-
-function downloadPredictionHtml(race, html) {
-  const date = race?.date || "race";
-  const place = race?.place_name || "nankan";
-  const raceNum = race?.race_num || "";
-  const filename = `${date}_${place}${raceNum}R.html`;
-  const blob = new Blob([enhancePredictionHtml(html)], { type: "text/html;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
+function normName(value) {
+  return String(value ?? "").replace(/[\s　]/g, "");
 }
 
 function patternSummary(pattern) {
-  const parts = Object.entries(pattern || {})
+  return Object.entries(pattern || {})
     .filter(([, value]) => value)
-    .map(([key, value]) => `<span class="badge">${escapeHtml(key)} ${escapeHtml(value)}</span>`);
-  return parts.join("");
+    .map(([key, value]) => `<span class="badge">${escapeHtml(key)} ${escapeHtml(value)}</span>`)
+    .join("");
 }
 
 function parseJson(value) {
@@ -994,13 +910,11 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ----------------------------- デモデータ -----------------------------
 function demoConfig() {
   return {
-    ok: true,
-    configured: true,
-    memoEnabled: true,
-    memoAuthRequired: false,
-    placeByCode: { "10": "大井", "11": "川崎", "12": "船橋", "13": "浦和" },
+    ok: true, configured: true, memoEnabled: true, memoAuthRequired: false,
+    placeByCode: PLACE_FALLBACK,
     patternDims: ["逃げ", "番手", "内枠", "中枠", "外枠"],
     patternMarks: ["◯", "△", "✕"],
   };
@@ -1009,37 +923,21 @@ function demoConfig() {
 function demoRaces(date, place) {
   const races = [
     {
-      race_key: "20260629_10_10",
-      date: "20260629",
-      place_code: "10",
-      place_name: "大井",
-      race_num: 10,
-      race_name: "サンプル特別",
-      dist: "1400",
-      course: "ダ1400m",
-      has_result: true,
-      generated_at: "2026-06-29T18:30:00",
+      race_key: "20260629_10_10", date: "20260629", place_code: "10", place_name: "大井",
+      race_num: 10, race_name: "サンプル特別", dist: "1400", course: "ダ1400m", post_time: "20:10",
+      eval_list_text: "【評価一覧】  S[1]  A[2]  B[3]  C[4]",
+      has_result: true, generated_at: "2026-06-29T18:30:00",
+      uma_ids: { サンプルスター: "demo-1", ミナミノライト: "demo-2", カワサキロード: "demo-3", ウラワノカゼ: "demo-4" },
     },
     {
-      race_key: "20260629_10_11",
-      date: "20260629",
-      place_code: "10",
-      place_name: "大井",
-      race_num: 11,
-      race_name: "メインレース",
-      dist: "1600",
-      course: "ダ1600m",
-      has_result: false,
-      generated_at: "2026-06-29T18:42:00",
+      race_key: "20260629_10_11", date: "20260629", place_code: "10", place_name: "大井",
+      race_num: 11, race_name: "メインレース", dist: "1600", course: "ダ1600m", post_time: "20:50",
+      eval_list_text: "【評価一覧】  S[1]  A[2]",
+      has_result: false, generated_at: "2026-06-29T18:42:00",
+      uma_ids: { サンプルスター: "demo-1", ミナミノライト: "demo-2" },
     },
   ].filter((race) => (!date || race.date === date) && (!place || race.place_code === place));
-  return {
-    ok: true,
-    races,
-    dates: ["20260629"],
-    places: [{ place_code: "10", place_name: "大井" }],
-    latestDate: "20260629",
-  };
+  return { ok: true, races, dates: ["20260629"], places: [{ place_code: "10", place_name: "大井" }], latestDate: "20260629" };
 }
 
 function demoRace(raceKey) {
@@ -1051,51 +949,54 @@ function demoRace(raceKey) {
     { umaban: 4, name: "ウラワノカゼ", uma_id: "demo-4", finish_rank: 7, popularity: 8, time_diff: 1.4, tier: "C" },
   ];
   return {
-    ok: true,
-    race,
-    page: {
-      data_html: `
-        <section style="padding:18px">
-          <h2 style="margin:0 0 12px">大井${race.race_num}R 予想ビュー</h2>
-          <table border="1" cellspacing="0" cellpadding="8" style="border-collapse:collapse;width:100%">
-            <tr><th>評価</th><th>馬</th><th>見立て</th></tr>
-            <tr><td>S</td><td>サンプルスター</td><td>相対比較で軸候補</td></tr>
-            <tr><td>A</td><td>ミナミノライト</td><td>展開次第で上位</td></tr>
-          </table>
-        </section>
-      `,
-      data_text: "",
-    },
-    horses,
-    results: horses,
-    notes: { "demo-1": { note_text: "内枠で揉まれなければ安定。" } },
+    ok: true, race,
+    page: { data_html: demoHtml(race), data_text: "" },
+    horses, results: horses,
+    notes: { "demo-1": { note_text: "内枠で揉まれなければ安定。前走は不利あり。" } },
     patterns: { "demo-1": { 内枠: "◯", 番手: "△" } },
   };
+}
+
+function demoHtml(race) {
+  return `<!doctype html><html><body>
+    <div class="sticky-top">
+      <div class="eval-bar">【評価一覧】  S[1]  A[2]  B[3]  C[4]</div>
+      <div class="tabs"></div>
+    </div>
+    <div id="tab-pace" class="tab-content"><div class="content-box"><pre>【展開予想】\nハナは[1]サンプルスター。番手に[3]。\nMペース想定。</pre></div></div>
+    <div id="tab-index" class="tab-content"><div class="content-box">相対評価テーブル（デモ）</div></div>
+    <div id="tab-ai" class="tab-content"><div class="content-box"><div>
+      <div class="horse-header"><span class="mark-btn" data-uma="1"></span><span>①サンプルスター　S</span></div>
+      騎:Ｄｅｍｏ騎手
+      【結論:計88点】
+      「気配良く順調。」
+      <span class="chokyo-label">【調教】</span><div class="chokyo-text">坂路47.0</div>
+      <hr>
+      <div class="horse-header"><span class="mark-btn" data-uma="2"></span><span>②ミナミノライト　A</span></div>
+      騎:Ｄｅｍｏ騎手
+      【結論:計80点】
+      「叩き2走目で上昇。」
+      <span class="chokyo-label">【調教】</span><div class="chokyo-text">坂路48.5</div>
+      <hr>
+    </div></div></div>
+    <div id="tab-match" class="tab-content"><div class="content-box"><pre>【対戦表】\n[1]サンプルスター > [2]ミナミノライト</pre></div></div>
+  </body></html>`;
 }
 
 function demoStats() {
   return {
     ok: true,
-    stats: {
-      S: { n: 8, win: 3, ren: 5, fuku: 6 },
-      A: { n: 11, win: 2, ren: 4, fuku: 6 },
-      B: { n: 14, win: 1, ren: 3, fuku: 5 },
-      C: { n: 18, win: 1, ren: 2, fuku: 3 },
-    },
-    races: [
-      { date: "20260629", place_name: "大井", race_num: 10, winner: "サンプルスター", hit_label: "勝ち" },
-    ],
+    stats: { S: { n: 8, fuku: 6 }, A: { n: 11, fuku: 6 }, B: { n: 14, fuku: 5 }, C: { n: 18, fuku: 3 } },
+    races: [{ date: "20260629", place_name: "大井", race_num: 10, winner: "サンプルスター", hit_label: "勝ち" }],
   };
 }
 
 function demoNotes(query) {
   const notes = [
     {
-      uma_id: "demo-1",
-      horse_name: "サンプルスター",
-      note_text: "内枠で揉まれなければ安定。",
-      pattern: { 内枠: "◯", 番手: "△" },
-      updated_at: "2026-06-29T19:00:00",
+      uma_id: "demo-1", horse_name: "サンプルスター",
+      note_text: "内枠で揉まれなければ安定。前走は不利あり。",
+      pattern: { 内枠: "◯", 番手: "△" }, updated_at: "2026-06-29T19:00:00",
     },
   ].filter((note) => !query || note.horse_name.includes(query));
   return { ok: true, notes };
