@@ -56,7 +56,7 @@ def main():
                 pass
     print(f"✅ horse_notes を {len(notes)} 件アップロード")
 
-    print("🎉 完了。Streamlit Cloud のアプリから見えるはずです。")
+    print("🎉 完了。Vercelサイトから見えるはずです。")
 
 
 if __name__ == "__main__":

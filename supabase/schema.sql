@@ -60,6 +60,6 @@ create index if not exists idx_races_date   on races(date);
 create index if not exists idx_results_uma  on race_results(uma_id);
 create index if not exists idx_results_name on race_results(horse_name);
 
--- このアプリは Streamlit（サーバ側）からのみ接続し、service_role キーを使う想定です。
+-- このアプリは MacBook の予想生成画面と Vercel Functions から接続し、service_role キーを使う想定です。
 -- service_role キーは RLS をバイパスするので、まずは RLS 無効のままでOK（鍵はブラウザに出ません）。
 -- もし anon キーで運用したい場合は各テーブルで RLS を有効化し、全許可ポリシーを作ってください。

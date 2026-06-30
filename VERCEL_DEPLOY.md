@@ -11,14 +11,14 @@
 
 | 役割 | 使うもの |
 |---|---|
-| 新しい予想を作る | Macの `run_umai.command` / `③ 予想画面を開く.command` |
+| 新しい予想を作る | Macの `MacBookで予想を作る.command` |
 | 予想・結果・メモの保管 | Supabase |
 | 普通のWebサイト画面 | Vercel |
 | 独自ドメイン | Cloudflare DNS |
 
 ## 1. Supabaseは今のものを使う
 
-すでに `DEPLOY.md` の手順でSupabaseを作っている場合は、そのまま使えます。
+すでにSupabaseを作っている場合は、そのまま使えます。
 
 Vercelに入れる値はこの2つです。
 
@@ -66,7 +66,7 @@ Cloudflare DNSでは、Vercel画面に表示された指示どおりに入れま
 3. スマホでVercel/独自ドメインのURLを開く
 4. メモを書く場合はPINを入れて保存
 
-Mac側の `.streamlit/secrets.toml` にSupabase設定が入っていれば、今まで通り予想生成時にクラウドへ反映されます。
+Mac側の `.streamlit/secrets.toml` にSupabase設定が入っていれば、予想生成時にVercelサイトへ反映されます。
 
 ## 5. ローカル確認
 

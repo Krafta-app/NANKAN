@@ -20,23 +20,16 @@ except Exception as e:
     st.stop()
 
 import streamlit.components.v1 as components
-import ui_common as ui
-ui.setup()  # DB初期化＋既存キャッシュの台帳取込（左メニューのアーカイブ/結果/メモで使用）
+
+try:
+    import store as db
+    db.init_db()
+except Exception as e:
+    st.warning(f"保存先DBの初期化をスキップしました: {e}")
 
 def main():
-    # クラウド版（Streamlit Cloud）では生成(Selenium)は動かさず、閲覧に誘導する
-    if ui.is_cloud():
-        st.title("🐎 南関競馬AI（クラウド版）")
-        st.success("スマホからいつでも閲覧できます。左メニューから選んでください。")
-        st.markdown(
-            "- 📚 **アーカイブ** … 過去の予想を表示\n"
-            "- 🏁 **結果・成績** … 着順照合・tier別的中率\n"
-            "- 📝 **メモ** … 馬ごとのメモ\n\n"
-            "新しい予想の生成は **Mac の `run_umai.command`** で行うと、自動でここに反映されます。"
-        )
-        return
-
-    st.title("🐎 南関競馬 AI予想生成 & 対戦表")
+    st.title("🐎 南関競馬 AI予想生成")
+    st.caption("閲覧・結果確認・メモはVercelサイトで行います。この画面はMacBookで新しい予想を作る専用です。")
 
     # --- サイドバー設定 ---
     with st.sidebar:
@@ -175,7 +168,7 @@ def main():
                         mime="text/html",
                         key=f"dl_cache_{r_num}"
                     )
-                st.caption("💡 過去の予想・結果・馬メモは左メニューの「アーカイブ / 結果成績 / メモ」から。")
+                st.caption("💡 生成後はSupabase経由でVercelサイトにも反映されます。")
                 st.divider()
 
     # 2. リトライボタン（失敗レースがある場合）
