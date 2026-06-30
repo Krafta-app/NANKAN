@@ -124,9 +124,27 @@ CREATE TABLE IF NOT EXISTS horse_marks (
     PRIMARY KEY (race_key, uma_id)
 );
 
+-- 調教データ（馬ごと・追い切り1本につき1行。中間追い切り含む今走調教のみ。前走は保存しない）
+CREATE TABLE IF NOT EXISTS horse_training (
+    uma_id      TEXT,
+    line_text   TEXT,            -- 元の今走調教行（一意キー）
+    horse_name  TEXT,
+    race_key    TEXT,            -- このデータを取得した時のレース
+    train_date  TEXT,            -- 調教日 MM/DD
+    course      TEXT,            -- 調教コース正規化名（大井/小林坂 等）
+    is_main     INTEGER,         -- 本馬場=1
+    load_type   TEXT,            -- 馬なり/強め/一杯
+    awase       INTEGER,         -- 併せ馬=1
+    time_1f     REAL,            -- 実計測ラスト1F
+    time_3f     REAL,            -- 実計測ラスト3F
+    updated_at  TEXT,
+    PRIMARY KEY (uma_id, line_text)
+);
+
 CREATE INDEX IF NOT EXISTS idx_races_date     ON races(date);
 CREATE INDEX IF NOT EXISTS idx_results_uma    ON race_results(uma_id);
 CREATE INDEX IF NOT EXISTS idx_results_name   ON race_results(horse_name);
+CREATE INDEX IF NOT EXISTS idx_training_uma   ON horse_training(uma_id);
 """
 
 
@@ -443,6 +461,63 @@ def get_marks(race_key):
     with get_conn() as c:
         return {r[0]: r[1] for r in c.execute(
             "SELECT uma_id, mark FROM horse_marks WHERE race_key=?", (race_key,)).fetchall()}
+
+
+# ---------------------------------------------------------------------------
+# horse_training（馬ごと調教データ。uma_id で永続・蓄積）
+# ---------------------------------------------------------------------------
+def upsert_training(rows):
+    """調教データ行を uma_id+line_text で冪等にupsert。rows: list[dict]。"""
+    rows = [r for r in (rows or []) if r.get("uma_id") and r.get("line_text")]
+    if not rows:
+        return 0
+    now = _now()
+    with get_conn() as c:
+        for r in rows:
+            c.execute(
+                """
+                INSERT INTO horse_training
+                  (uma_id, line_text, horse_name, race_key, train_date, course,
+                   is_main, load_type, awase, time_1f, time_3f, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(uma_id, line_text) DO UPDATE SET
+                    horse_name=excluded.horse_name, race_key=excluded.race_key,
+                    train_date=excluded.train_date, course=excluded.course,
+                    is_main=excluded.is_main, load_type=excluded.load_type,
+                    awase=excluded.awase, time_1f=excluded.time_1f,
+                    time_3f=excluded.time_3f, updated_at=excluded.updated_at
+                """,
+                (r.get("uma_id"), r.get("line_text"), r.get("horse_name"),
+                 r.get("race_key"), r.get("train_date"), r.get("course"),
+                 1 if r.get("is_main") else 0, r.get("load_type"),
+                 1 if r.get("awase") else 0, r.get("time_1f"), r.get("time_3f"), now),
+            )
+    return len(rows)
+
+
+def get_training(uma_id):
+    """その馬の調教履歴（新しい日付順）。"""
+    if not uma_id:
+        return []
+    with get_conn() as c:
+        rows = c.execute(
+            "SELECT * FROM horse_training WHERE uma_id=? ORDER BY train_date DESC, updated_at DESC",
+            (uma_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_training_map(uma_ids):
+    ids = [u for u in (uma_ids or []) if u]
+    if not ids:
+        return {}
+    ph = ",".join("?" * len(ids))
+    out = {}
+    with get_conn() as c:
+        for r in c.execute(
+            f"SELECT * FROM horse_training WHERE uma_id IN ({ph})", ids).fetchall():
+            out.setdefault(r["uma_id"], []).append(dict(r))
+    return out
 
 
 # ---------------------------------------------------------------------------

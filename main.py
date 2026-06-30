@@ -242,6 +242,8 @@ def main():
                     race_num = event.get("race_num")
                     output_text = event.get("data_text", event.get("data", ""))
                     output_html = event.get("data_html", "")
+                    result_seq = st.session_state.get("result_render_seq", 0) + 1
+                    st.session_state.result_render_seq = result_seq
                     
                     st.session_state.results_cache[race_num] = {
                         "text": output_text,
@@ -254,7 +256,7 @@ def main():
                             label=f"{race_num}R 結果 (速報)",
                             value=keiba_bot.strip_display_markers(output_text),
                             height=500,
-                            key=f"res_live_{race_num}"
+                            key=f"res_live_{race_num}_{result_seq}"
                         )
                         if output_html:
                             st.download_button(
@@ -262,7 +264,7 @@ def main():
                                 data=output_html,
                                 file_name=f"{year}{month}{day}_{selected_place}{race_num}R.html",
                                 mime="text/html",
-                                key=f"dl_live_{race_num}"
+                                key=f"dl_live_{race_num}_{result_seq}"
                             )
                         st.divider()
                     

@@ -1582,10 +1582,10 @@ DATA_DIR = "2025data"
 JOCKEY_FILE = os.path.join(DATA_DIR, "2025_NARJockey.csv")
 TRAINER_FILE = os.path.join(DATA_DIR, "2025_NankanTrainer.csv")
 POWER_FILE = os.path.join(DATA_DIR, "2025_騎手パワー.xlsx")
-SCORE_POLICY_VERSION = "v20260701_chokyo_rank_all_lines"
+SCORE_POLICY_VERSION = "v20260701_chokyo_same_day_course_top3"
 
 # 当日各コース横断の調教上位(赤字)への加点。
-# 同日同コース同メトリクスで10頭以上いる場合のみ、5位以内を対象。
+# 今走調教(中間追い切り含む)だけを対象に、同日・同じ調教場所・同じメトリクスで10頭以上いる場合のみ、3位以内を対象。
 CHOKYO_TOP_BONUS = 5
 CHOKYO_TOP_MIN_GROUP_SIZE = 10
 
@@ -1894,6 +1894,24 @@ def _extract_training_course(text):
     is_main_track = course in {"浦和", "川崎", "大井", "船橋"} and bool(re.match(r'\s*(?:本馬場|本)', tail))
     return course, is_main_track
 
+def _chokyo_load_penalty(line):
+    """負荷・併せによる『タイムの出やすさ』を割り引くための横比較用ペナルティ秒。
+    併せ馬 or 一杯 → +0.2秒、強め → +0.1秒、馬なり(単走) → 0。
+    本人の負荷は時計より前に書かれ、' / '以降は併せ相手の情報なので、
+    負荷語(一杯/強め)は ' / ' より前の本人区間だけで判定する。
+    併せ相手の区切りは ' / '(前後スペース付き)。日付の '6/26' はスペースが無いので除外される。
+    ' / ' があれば併せ馬ありとみなす(単走には付かない)。
+    返す値は比較用にのみ加算し、表示タイムには反映しない。"""
+    s = str(line or "")
+    self_part = s.split(' / ', 1)[0]   # 本人の負荷区間（時計を含む。日付スラッシュは無視）
+    has_awase = ' / ' in s             # 併せ相手の記載 = 併せ馬
+    if has_awase or ('一杯' in self_part):
+        return 0.2
+    if '強め' in self_part:
+        return 0.1
+    return 0.0
+
+
 def _training_judge_time(t_3f, is_main_track):
     try:
         t = float(t_3f)
@@ -1909,9 +1927,9 @@ def _training_threshold(table, course, is_main_track):
 
 
 def _compute_day_chokyo_red(entries):
-    """当日生成した全レースを横断し、同一(日・調教コース・メトリクス)グループ内でタイムが速い順に順位付け。
+    """当日生成した全レースを横断し、同一(日付・調教コース・メトリクス)グループ内でタイムが速い順に順位付け。
     同一グループ10頭以上の時だけ対象。
-    5位以内を「調教上位(赤字＋加点)」とする。
+    3位以内を「調教上位(赤字＋加点)」とする。
     entries: [{r_num, umaban, key, time, disp, line}] / key=(date,(course,is_main),metric)
     Returns: {(r_num, umaban): {"rank": rank, "total": group_size, "line": line, "disp": disp}}"""
     groups = {}
@@ -1925,10 +1943,11 @@ def _compute_day_chokyo_red(entries):
         group_size = len(grp)
         if group_size < CHOKYO_TOP_MIN_GROUP_SIZE:
             continue
-        grp.sort(key=lambda e: (float(e["time"]), int(e["r_num"]), int(e["umaban"])))
+        # 負荷補正タイム(adj_time)でランク付け。未設定の古いエントリは実タイムで代替。
+        grp.sort(key=lambda e: (float(e.get("adj_time", e["time"])), int(e["r_num"]), int(e["umaban"])))
         for i, e in enumerate(grp):
             rank = i + 1
-            if rank <= 5:
+            if rank <= 3:
                 k = (int(e["r_num"]), str(e["umaban"]))
                 info = {
                     "rank": rank,
@@ -2050,7 +2069,7 @@ def _parse_kon_chokyo_for_ranking(line):
 
 
 def _parse_kon_chokyo_entries_for_ranking(line):
-    """『今走調教：…』行から同日横断比較用の候補を返す。
+    """『今走調教：…』行から横断比較用の候補を返す。
     同じ日・同じ調教コースで、1F(9.5–13.9) と 3F(33.0–41.0) は別グループで比較する。
     """
     if not line or "今走調教" not in line:
@@ -2079,12 +2098,15 @@ def _parse_kon_chokyo_entries_for_ranking(line):
         elif 33.0 <= n <= 41.0:
             three_f_val = n
 
+    penalty = _chokyo_load_penalty(line)  # 併せ/一杯+0.2, 強め+0.1（比較用のみ）
+
     out = []
     if one_f_val is not None:
         out.append({
             "date": date_key,
             "course_key": (course, is_main),
-            "time": one_f_val,
+            "time": one_f_val,                 # 表示・保存用は実計測タイム
+            "adj_time": one_f_val + penalty,   # 横比較ランキング用の負荷補正タイム
             "metric": "1F",
             "disp": f"{course}{one_f_val:.1f}",
             "line": line.rstrip(),
@@ -2094,11 +2116,60 @@ def _parse_kon_chokyo_entries_for_ranking(line):
             "date": date_key,
             "course_key": (course, is_main),
             "time": three_f_val,
+            "adj_time": three_f_val + penalty,
             "metric": "3F",
             "disp": f"{course}{three_f_val:.1f}",
             "line": line.rstrip(),
         })
     return out
+
+
+def _parse_training_line_full(line):
+    """今走調教行を1本ぶん構造化する（Supabase/SQLite保存用）。前走調教は対象外。
+    時計は本人区間（' / ' より前）からのみ拾い、併せ相手のタイムは拾わない。
+    保存するタイムは実計測値（負荷補正は加えない）。"""
+    if not line or "今走調教" not in line:
+        return None
+    m_d = re.search(r'(\d{1,2})/(\d{1,2})', line)
+    train_date = f"{int(m_d.group(1)):02d}/{int(m_d.group(2)):02d}" if m_d else ""
+    course, is_main = _extract_training_course(line)
+    self_part = str(line).split(' / ', 1)[0]
+    load_type = next((w for w in ("一杯", "強め", "馬なり") if w in self_part), "")
+    awase = ' / ' in str(line)
+    one_f = three_f = None
+    for s in re.findall(r'(\d{1,3}\.\d)', self_part):
+        try:
+            v = float(s)
+        except ValueError:
+            continue
+        if 9.5 <= v <= 13.9:
+            one_f = v
+        elif 33.0 <= v <= 41.0:
+            three_f = v
+    return {
+        "train_date": train_date, "course": course, "is_main": is_main,
+        "load_type": load_type, "awase": awase,
+        "time_1f": one_f, "time_3f": three_f,
+        "line_text": str(line).rstrip(),
+    }
+
+
+def _build_training_rows(horses, cyokyo, race_key):
+    """1レース分の今走調教（中間追い切り含む全行）を uma_id 紐付けの保存行へ変換する。
+    horses: {umaban: {uma_id, name, ...}}, cyokyo: {umaban: 調教テキスト}。"""
+    rows = []
+    for umaban, h in (horses or {}).items():
+        uid = (h or {}).get("uma_id")
+        if not uid:
+            continue
+        text = (cyokyo or {}).get(str(umaban)) or (cyokyo or {}).get(umaban) or ""
+        for ln in re.findall(r'今走調教：[^\n]+', text):
+            parsed = _parse_training_line_full(ln)
+            if not parsed:
+                continue
+            parsed.update({"uma_id": uid, "horse_name": h.get("name", ""), "race_key": race_key})
+            rows.append(parsed)
+    return rows
 
 
 def _build_kon_chokyo_marks(per_race_ai_text, num_races_total):
@@ -2122,6 +2193,7 @@ def _build_kon_chokyo_marks(per_race_ai_text, num_races_total):
                     "date": parsed["date"],
                     "course_key": parsed["course_key"],
                     "time": parsed["time"],
+                    "adj_time": parsed.get("adj_time", parsed["time"]),
                     "metric": parsed["metric"],
                 })
 
@@ -2133,14 +2205,14 @@ def _build_kon_chokyo_marks(per_race_ai_text, num_races_total):
         key = (e["date"], e["course_key"], e["metric"])
         global_groups.setdefault(key, []).append(e)
     for grp in global_groups.values():
-        grp.sort(key=lambda x: x["time"])
+        grp.sort(key=lambda x: x.get("adj_time", x["time"]))
 
     per_race_groups = {}
     for e in all_entries:
         key = (e["race_num"], e["date"], e["course_key"], e["metric"])
         per_race_groups.setdefault(key, []).append(e)
     for grp in per_race_groups.values():
-        grp.sort(key=lambda x: x["time"])
+        grp.sort(key=lambda x: x.get("adj_time", x["time"]))
 
     def _rank_in(group, target):
         for i, e in enumerate(group):
@@ -2163,7 +2235,7 @@ def _build_kon_chokyo_marks(per_race_ai_text, num_races_total):
         rank_disp = None
         total_disp = None
         if (num_races_total >= 2 and g_total >= CHOKYO_TOP_MIN_GROUP_SIZE
-                and g_rank is not None and g_rank <= 5):
+                and g_rank is not None and g_rank <= 3):
             kind = 'RB'
             rank_disp = g_rank
             total_disp = g_total
@@ -4904,7 +4976,7 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
 
         # 当日各コース横断の調教上位（赤字）集計用。今走調教のコース/メトリクス/タイムを控える。
         chokyo_time_disp = ""    # 例: 大井36.5（3F、🕰️表示用）
-        chokyo_rank_key = None   # (date, (course,is_main), metric) ＝ 同コース同メトリクスで順位付け
+        chokyo_rank_key = None   # (date, (course,is_main), metric) ＝ 同日同コース同メトリクスで順位付け
         chokyo_rank_time = None  # 順位付けに使う実タイム（1F優先→無ければ3F）
         chokyo_rank_disp = ""    # 例: 大井12.3 / 大井37.0
         chokyo_rank_entries = [] # 今走調教の全行から抽出した同日横断ランキング素材
@@ -5089,7 +5161,7 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
                 if t_3f is not None and t_3f < 900 and c_name_norm in standard_times:
                     chokyo_time_disp = f"{c_name_norm}{t_3f:.1f}"
                 if chokyo_rank_entries:
-                    _best_e = sorted(chokyo_rank_entries, key=lambda e: (0 if e.get("metric") == "1F" else 1, float(e.get("time") or 999)))[0]
+                    _best_e = sorted(chokyo_rank_entries, key=lambda e: (0 if e.get("metric") == "1F" else 1, float(e.get("adj_time", e.get("time")) or 999)))[0]
                     chokyo_rank_key = (_best_e["date"], _best_e["course_key"], _best_e["metric"])
                     chokyo_rank_time = _best_e["time"]
                     chokyo_rank_disp = _best_e.get("disp") or f"{_best_e['course_key'][0]}{_best_e['time']:.1f}"
@@ -8934,6 +9006,7 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                                 "r_num": int(r_num), "umaban": str(_u),
                                 "key": (_e.get("date"), _e.get("course_key"), _e.get("metric")),
                                 "time": _e.get("time"),
+                                "adj_time": _e.get("adj_time", _e.get("time")),
                                 "disp": _e.get("disp"),
                                 "line": _e.get("line"),
                                 "metric": _e.get("metric"),
@@ -9008,6 +9081,13 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                                 post_time=nk_data['meta'].get('post_time', ''),
                                 data_html=final_html, data_text=final_text,
                             )
+                            # 調教データを馬(uma_id)単位で蓄積（メモと同じく永続）。失敗しても生成は止めない。
+                            try:
+                                _db.upsert_training(_build_training_rows(
+                                    nk_data["horses"], cyokyo,
+                                    f"{year}{month}{day}_{place_code}_{r_num}"))
+                            except Exception as _et:
+                                print(f"  [DB] upsert_training skipped: {_et}")
                         except Exception as _e:
                             print(f"  [DB] register_race skipped: {_e}")
                 except Exception:

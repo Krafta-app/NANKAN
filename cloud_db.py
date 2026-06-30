@@ -356,6 +356,57 @@ def get_marks(race_key):
 
 
 # ---------------------------------------------------------------------------
+# horse_training（馬ごと調教データ。uma_id で永続・蓄積）
+# ---------------------------------------------------------------------------
+def upsert_training(rows):
+    """調教データ行を uma_id+line_text で冪等にupsert。rows: list[dict]。
+    horse_training テーブル未作成のSupabaseでも生成を止めないよう例外は握りつぶす。"""
+    rows = [r for r in (rows or []) if r.get("uma_id") and r.get("line_text")]
+    if not rows:
+        return 0
+    now = _now()
+    payload = [{
+        "uma_id": r.get("uma_id"), "line_text": r.get("line_text"),
+        "horse_name": r.get("horse_name"), "race_key": r.get("race_key"),
+        "train_date": r.get("train_date"), "course": r.get("course"),
+        "is_main": bool(r.get("is_main")), "load_type": r.get("load_type"),
+        "awase": bool(r.get("awase")), "time_1f": r.get("time_1f"),
+        "time_3f": r.get("time_3f"), "updated_at": now,
+    } for r in rows]
+    try:
+        _c().table("horse_training").upsert(payload, on_conflict="uma_id,line_text").execute()
+    except Exception as e:
+        print(f"[supabase] upsert_training skipped (horse_trainingテーブルが必要): {e}")
+        return 0
+    return len(rows)
+
+
+def get_training(uma_id):
+    if not uma_id:
+        return []
+    try:
+        r = (_c().table("horse_training").select("*").eq("uma_id", uma_id)
+             .order("train_date", desc=True).order("updated_at", desc=True).execute())
+    except Exception:
+        return []
+    return r.data or []
+
+
+def get_training_map(uma_ids):
+    ids = [u for u in (uma_ids or []) if u]
+    if not ids:
+        return {}
+    try:
+        r = _c().table("horse_training").select("*").in_("uma_id", ids).execute()
+    except Exception:
+        return {}
+    out = {}
+    for row in (r.data or []):
+        out.setdefault(row["uma_id"], []).append(row)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # tier別 的中集計
 # ---------------------------------------------------------------------------
 def tier_hit_stats(date=None, place_code=None):

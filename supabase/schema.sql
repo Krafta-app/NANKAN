@@ -58,9 +58,28 @@ create table if not exists horse_marks (
     primary key (race_key, uma_id)
 );
 
+-- 調教データ（馬ごと・追い切り1本につき1行。中間追い切り含む今走調教のみ。前走は保存しない）
+-- horse_notes と同じく uma_id 単位で永続・蓄積する（cleanup_old_races では消さない）。
+create table if not exists horse_training (
+    uma_id      text,
+    line_text   text,            -- 元の今走調教行（一意キー）
+    horse_name  text,
+    race_key    text,            -- このデータを取得した時のレース
+    train_date  text,            -- 調教日 MM/DD
+    course      text,            -- 調教コース正規化名（大井/小林坂 等）
+    is_main     boolean,         -- 本馬場か
+    load_type   text,            -- 馬なり/強め/一杯
+    awase       boolean,         -- 併せ馬か
+    time_1f     double precision,-- 実計測ラスト1F
+    time_3f     double precision,-- 実計測ラスト3F
+    updated_at  text,
+    primary key (uma_id, line_text)
+);
+
 create index if not exists idx_races_date   on races(date);
 create index if not exists idx_results_uma  on race_results(uma_id);
 create index if not exists idx_results_name on race_results(horse_name);
+create index if not exists idx_training_uma on horse_training(uma_id);
 
 -- このアプリは MacBook の予想生成画面と Vercel Functions から接続し、service_role キーを使う想定です。
 -- service_role キーは RLS をバイパスするので、まずは RLS 無効のままでOK（鍵はブラウザに出ません）。
