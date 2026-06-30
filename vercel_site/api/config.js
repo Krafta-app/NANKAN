@@ -13,6 +13,9 @@ module.exports = async function handler(req, res) {
   sendJson(res, 200, {
     ok: true,
     configured: cfg.configured,
+    supabaseProjectRef: cfg.projectRef,
+    supabaseKeyRole: cfg.keyInfo.role,
+    supabaseKeyRef: cfg.keyInfo.ref,
     memoEnabled: cfg.configured && cfg.usingServiceRole,
     memoAuthRequired: Boolean(cfg.pin),
     placeByCode: PLACE_BY_CODE,

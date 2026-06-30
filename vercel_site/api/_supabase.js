@@ -28,12 +28,38 @@ function getConfig() {
   return {
     url,
     key,
+    projectRef: projectRefFromUrl(url),
+    keyInfo: decodeSupabaseKey(key),
     pin: process.env.NANKAN_SITE_PIN || "",
     configured: Boolean(url && key),
     usingServiceRole: Boolean(
       process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY,
     ),
   };
+}
+
+function projectRefFromUrl(url) {
+  try {
+    const host = new URL(url).hostname;
+    return host.endsWith(".supabase.co") ? host.split(".")[0] : host;
+  } catch {
+    return "";
+  }
+}
+
+function decodeSupabaseKey(key) {
+  if (!key || !key.includes(".")) return { role: "", ref: "" };
+  try {
+    const payload = key.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = payload.padEnd(payload.length + ((4 - (payload.length % 4)) % 4), "=");
+    const data = JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
+    return {
+      role: data.role || "",
+      ref: data.ref || data.project_ref || "",
+    };
+  } catch {
+    return { role: "", ref: "" };
+  }
 }
 
 function jsonHeaders(extra = {}) {

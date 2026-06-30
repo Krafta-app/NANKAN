@@ -36,6 +36,7 @@ module.exports = async function handler(req, res) {
 
     sendJson(res, 200, {
       ok: true,
+      supabaseProjectRef: require("./_supabase").getConfig().projectRef,
       races,
       dates,
       places,
