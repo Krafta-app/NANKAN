@@ -27,6 +27,10 @@ CACHE_DIR = os.path.join(_BASE, "cache")
 PLACE_NAME_BY_CODE = {"10": "大井", "11": "川崎", "12": "船橋", "13": "浦和"}
 NK_PLACE_BY_CODE = {"10": "20", "11": "21", "12": "19", "13": "18"}
 
+# 好走パターン（馬ごとメモの2種類目）。位置(逃げ/番手)と枠(内/中/外)を◯△✕で記録。
+PATTERN_DIMS = ["逃げ", "番手", "内枠", "中枠", "外枠"]
+PATTERN_MARKS = ["◯", "△", "✕"]
+
 
 def race_id_from_taisen_cache(date, place_code, race_num):
     """既存の cache/taisen_{16桁id}.html から race_id をオフラインで復元。
@@ -104,10 +108,11 @@ CREATE TABLE IF NOT EXISTS race_results (
 );
 
 CREATE TABLE IF NOT EXISTS horse_notes (
-    uma_id     TEXT PRIMARY KEY,
-    horse_name TEXT,
-    note_text  TEXT,
-    updated_at TEXT
+    uma_id       TEXT PRIMARY KEY,
+    horse_name   TEXT,
+    note_text    TEXT,
+    pattern_json TEXT,           -- 好走パターン {逃げ/番手/内枠/中枠/外枠: ◯/△/✕}
+    updated_at   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS horse_marks (
@@ -128,6 +133,11 @@ def init_db():
     """スキーマを作成（冪等）。"""
     with get_conn() as c:
         c.executescript(SCHEMA)
+        # 既存DBへの列追加（無ければ追加・あれば無視）
+        try:
+            c.execute("ALTER TABLE horse_notes ADD COLUMN pattern_json TEXT")
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +284,11 @@ def set_note(uma_id, horse_name, text):
     text = (text or "").strip()
     with get_conn() as c:
         if not text:
-            c.execute("DELETE FROM horse_notes WHERE uma_id=?", (uma_id,))
+            row = c.execute("SELECT pattern_json FROM horse_notes WHERE uma_id=?", (uma_id,)).fetchone()
+            if row and row[0] and row[0] not in ("", "{}"):
+                c.execute("UPDATE horse_notes SET note_text='', updated_at=? WHERE uma_id=?", (_now(), uma_id))
+            else:
+                c.execute("DELETE FROM horse_notes WHERE uma_id=?", (uma_id,))
         else:
             c.execute(
                 """
@@ -304,7 +318,7 @@ def get_notes_map(uma_ids):
 
 def search_notes(query=""):
     """メモ全件（馬名部分一致で絞り込み）。更新日時の新しい順。"""
-    q = "SELECT uma_id, horse_name, note_text, updated_at FROM horse_notes"
+    q = "SELECT uma_id, horse_name, note_text, pattern_json, updated_at FROM horse_notes"
     args = []
     if query:
         q += " WHERE horse_name LIKE ?"
@@ -312,6 +326,72 @@ def search_notes(query=""):
     q += " ORDER BY updated_at DESC"
     with get_conn() as c:
         return [dict(r) for r in c.execute(q, args).fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# horse_notes（好走パターン）
+# ---------------------------------------------------------------------------
+def get_pattern(uma_id):
+    """{逃げ/番手/内枠/中枠/外枠: ◯/△/✕} を返す。無ければ {}。"""
+    if not uma_id:
+        return {}
+    with get_conn() as c:
+        row = c.execute("SELECT pattern_json FROM horse_notes WHERE uma_id=?", (uma_id,)).fetchone()
+    if row and row[0]:
+        try:
+            return json.loads(row[0]) or {}
+        except Exception:
+            return {}
+    return {}
+
+
+def set_pattern(uma_id, horse_name, pattern):
+    """好走パターンを保存。空マークは除去。全空かつ普通メモも無ければ行ごと削除。"""
+    if not uma_id:
+        return
+    pattern = {k: v for k, v in (pattern or {}).items() if v}
+    pj = json.dumps(pattern, ensure_ascii=False) if pattern else None
+    with get_conn() as c:
+        if not pattern:
+            row = c.execute("SELECT note_text FROM horse_notes WHERE uma_id=?", (uma_id,)).fetchone()
+            if row and (row[0] or "").strip():
+                c.execute("UPDATE horse_notes SET pattern_json=NULL, updated_at=? WHERE uma_id=?", (_now(), uma_id))
+            else:
+                c.execute("DELETE FROM horse_notes WHERE uma_id=?", (uma_id,))
+        else:
+            c.execute(
+                """
+                INSERT INTO horse_notes (uma_id, horse_name, pattern_json, updated_at)
+                VALUES (?,?,?,?)
+                ON CONFLICT(uma_id) DO UPDATE SET
+                    horse_name=excluded.horse_name,
+                    pattern_json=excluded.pattern_json,
+                    updated_at=excluded.updated_at
+                """,
+                (uma_id, horse_name, pj, _now()),
+            )
+
+
+def get_patterns_map(uma_ids):
+    """{uma_id: pattern_dict} を一括取得（採点・展開表示で全馬分まとめて）。"""
+    ids = [u for u in (uma_ids or []) if u]
+    if not ids:
+        return {}
+    ph = ",".join("?" * len(ids))
+    out = {}
+    with get_conn() as c:
+        rows = c.execute(
+            f"SELECT uma_id, pattern_json FROM horse_notes WHERE uma_id IN ({ph})", ids
+        ).fetchall()
+    for u, pj in rows:
+        if pj:
+            try:
+                d = json.loads(pj)
+            except Exception:
+                d = {}
+            if d:
+                out[u] = d
+    return out
 
 
 def races_for_uma(uma_id):

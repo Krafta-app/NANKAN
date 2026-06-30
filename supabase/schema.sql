@@ -39,11 +39,14 @@ create table if not exists race_results (
 );
 
 create table if not exists horse_notes (
-    uma_id     text primary key,
-    horse_name text,
-    note_text  text,
-    updated_at text
+    uma_id       text primary key,
+    horse_name   text,
+    note_text    text,
+    pattern_json text,           -- 好走パターン {逃げ/番手/内枠/中枠/外枠: ◯/△/✕}
+    updated_at   text
 );
+-- 既にテーブルがある場合の列追加（無ければ追加）
+alter table horse_notes add column if not exists pattern_json text;
 
 create table if not exists horse_marks (
     race_key   text,

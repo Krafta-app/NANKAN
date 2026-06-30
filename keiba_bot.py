@@ -5184,7 +5184,71 @@ def _deterministic_total(sc):
     s5 = int(sc.get("score_5", 0) or 0)
     s6 = int(sc.get("score_6", 0) or 0)
     sp = int(sc.get("score_pace", 0) or 0)   # ⑦展開加点(ペース加点＋競馬場×距離の前有利加点)
-    return s2 + s3 + s4 + s5 + s6 + sp
+    spt = int(sc.get("score_pattern", 0) or 0)  # 好走パターン(ユーザーメモ)による±5
+    return s2 + s3 + s4 + s5 + s6 + sp + spt
+
+
+def _format_pattern_short(pattern):
+    """好走パターンを「好走傾向：逃◯ 内✕ 中◯」の短い文字列に。空なら ''。"""
+    if not pattern:
+        return ""
+    short = {"逃げ": "逃", "番手": "番", "内枠": "内", "中枠": "中", "外枠": "外"}
+    parts = [f"{short[d]}{pattern[d]}" for d in ("逃げ", "番手", "内枠", "中枠", "外枠")
+             if pattern.get(d)]
+    return ("好走傾向：" + " ".join(parts)) if parts else ""
+
+
+def _est_pos_position_dim(est_pos):
+    """想定位置(est_pos)を 逃げ/番手 の好走パターン次元へ。該当なしは None。"""
+    try:
+        ep = float(est_pos)
+    except (TypeError, ValueError):
+        return None
+    if ep <= 1.5:
+        return "逃げ"
+    if ep <= 3.5:
+        return "番手"
+    return None
+
+
+def _gate_pattern_dim(field_size, umaban):
+    """今回枠を 内枠/中枠/外枠 へ。"""
+    return {"内目": "内枠", "中目": "中枠", "外目": "外枠"}.get(_gate_group(field_size, umaban))
+
+
+def _fetch_horse_patterns(horses_data):
+    """出走各馬の好走パターンを {uma_id: {dim: mark}} で取得（DB未設定でも安全）。"""
+    try:
+        import store as _db
+        uma_ids = [h.get("uma_id") for h in horses_data.values() if h.get("uma_id")]
+        return _db.get_patterns_map(uma_ids)
+    except Exception as e:
+        print(f"  [好走パターン] 取得スキップ: {e}")
+        return {}
+
+
+def apply_pattern_bonus(scored_data, horses_data, pace_speed_list, patterns):
+    """ユーザーの好走パターン(◯/✕)を今回の想定位置・枠と突き合わせ、
+    一致する◯=+5 / ✕=-5 を score_pattern として加点する。"""
+    if not patterns:
+        return
+    est_by_umaban = {str(p.get("umaban")): p.get("est_pos") for p in (pace_speed_list or [])}
+    field_size = len(horses_data)
+    for umaban, h in horses_data.items():
+        uid = h.get("uma_id")
+        pat = patterns.get(uid) if uid else None
+        if not pat:
+            continue
+        bonus = 0
+        pos_dim = _est_pos_position_dim(est_by_umaban.get(str(umaban)))
+        if pos_dim and pat.get(pos_dim) in ("◯", "✕"):
+            bonus += 5 if pat[pos_dim] == "◯" else -5
+        gate_dim = _gate_pattern_dim(field_size, umaban)
+        if gate_dim and pat.get(gate_dim) in ("◯", "✕"):
+            bonus += 5 if pat[gate_dim] == "◯" else -5
+        sd = scored_data.get(str(umaban)) or scored_data.get(umaban)
+        if bonus and sd is not None:
+            sd["score_pattern"] = bonus
 
 
 def format_deterministic_evaluation(horses_data: dict, cyokyo_data: dict, scored_data: dict, danwa_data: dict):
@@ -5236,13 +5300,15 @@ def format_deterministic_evaluation(horses_data: dict, cyokyo_data: dict, scored
         s6 = int(sc.get("score_6", 0) or 0)
         sp = int(sc.get("score_pace", 0) or 0)
         pace_disp = f" ⑦展開{sp}" if sp else ""
+        spt = int(sc.get("score_pattern", 0) or 0)
+        pat_disp = f" 好走{'+' if spt > 0 else ''}{spt}" if spt else ""
         tier = sc.get("relative_tier")
         rel_label = sc.get("no_relative_grade") or (f"相対{_rel_label_display(tier)}" if tier else "相対不明")
 
         block = f"{circled_num}{horse_name}　{rank}\n"
         block += f"騎:{jockey_disp}　{jockey_stats}\n"
         block += f"【結論:計{total}点】\n"
-        block += f"【内訳】⑤{rel_label}={s5} ④調教{s4} ②騎手{s2} ⑥対戦{s6} ③盛返{s3}{pace_disp}\n"
+        block += f"【内訳】⑤{rel_label}={s5} ④調教{s4} ②騎手{s2} ⑥対戦{s6} ③盛返{s3}{pace_disp}{pat_disp}\n"
         block += f"{flags} 「{comment}」\n" if flags else f"「{comment}」\n"
         block += f"【調教】\n{cyokyo_display}\n"
         block += f"🐎レース内容\n{race_content}\n"
@@ -6784,7 +6850,7 @@ def _circled_num(n):
         pass
     return str(n)
 
-def predict_pace_python(horses_data, danwa_data, current_distance_str):
+def predict_pace_python(horses_data, danwa_data, current_distance_str, horse_patterns=None):
     predictions = []
     
     dm = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)(?=m)', str(current_distance_str).replace(',', ''))
@@ -7475,10 +7541,18 @@ def predict_pace_python(horses_data, danwa_data, current_distance_str):
     def _candidate_text(p, with_stable_note=False):
         ideal_mark = _get_star_mark(p)
         text = f"{_circled_num(p['umaban'])}{p['name']}{ideal_mark}"
+        extras = []
         if with_stable_note:
             comment = _clean_danwa_text(_danwa_for_umaban(p["umaban"]))
             if comment != "コメントなし":
-                text += f"\n[[SMALL]]　厩舎の話：{comment}[[/SMALL]]"
+                extras.append(f"厩舎の話：{comment}")
+        if horse_patterns:
+            uid = horses_data.get(str(p["umaban"]), {}).get("uma_id", "")
+            ptxt = _format_pattern_short(horse_patterns.get(uid))
+            if ptxt:
+                extras.append(ptxt)
+        if extras:
+            text += "\n[[SMALL]]　" + " ／ ".join(extras) + "[[/SMALL]]"
         return text
 
     pos_groups = {"逃げ": [], "先行": [], "中団": [], "後方": []}
@@ -8502,6 +8576,9 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
 
                 full_prompt = header + "\n\n" + "\n\n".join(horse_texts)
 
+                # 出走各馬の好走パターン(ユーザーメモ)を取得（採点±5と展開の小表示に使用）
+                horse_patterns = _fetch_horse_patterns(nk_data["horses"])
+
                 if mode == "raw":
                     yield {"type": "status", "data": f"🔍 {r_num}R 対戦データを取得中..."}
                     header1 = f"{nk_data['meta'].get('race_name','')}  {nk_data['meta'].get('course','')}  {nk_data['meta'].get('grade','')}"
@@ -8515,7 +8592,7 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                         current_dist = _dist_m.group(1).replace(',', '') if _dist_m else "1400"
                     match_txt = _fetch_matchup_table_selenium(driver, nk_id, grades={}, horses_data=nk_data["horses"], current_course=current_course, current_dist=current_dist)
                     
-                    pace_text, pace_speed_list, pace_bonus_map = predict_pace_python(nk_data["horses"], danwa, nk_data['meta'].get('course',''))
+                    pace_text, pace_speed_list, pace_bonus_map = predict_pace_python(nk_data["horses"], danwa, nk_data['meta'].get('course',''), horse_patterns=horse_patterns)
                     details_text = _strip_chokyo_jockey_lines("\n\n".join(horse_texts))
 
                     final_text = (
@@ -8542,7 +8619,7 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                     continue
 
                 header1 = f"{nk_data['meta'].get('race_name','')}  {nk_data['meta'].get('course','')}  {nk_data['meta'].get('grade','')}"
-                pace_text, pace_speed_list, pace_bonus_map = predict_pace_python(nk_data["horses"], danwa, nk_data['meta'].get('course',''))
+                pace_text, pace_speed_list, pace_bonus_map = predict_pace_python(nk_data["horses"], danwa, nk_data['meta'].get('course',''), horse_patterns=horse_patterns)
                 details_text = _strip_chokyo_jockey_lines("\n\n".join(horse_texts))
 
                 if mode == "pace":
@@ -8615,6 +8692,9 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                         scored_data[u_key]["score_6"] = pts
                     elif u_key.isdigit() and int(u_key) in scored_data:
                         scored_data[int(u_key)]["score_6"] = pts
+
+                # 好走パターン(ユーザーメモ)：今回の想定位置・枠に一致する◯=+5/✕=-5を合計へ反映。
+                apply_pattern_bonus(scored_data, nk_data["horses"], pace_speed_list, horse_patterns)
 
                 yield {"type": "status", "data": f"📊 {r_num}R 採点中..."}
                 ai_out_clean, grades = format_deterministic_evaluation(nk_data["horses"], cyokyo, scored_data, danwa)

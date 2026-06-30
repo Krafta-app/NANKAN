@@ -16,27 +16,43 @@ PLACE_NAME_BY_CODE = _local.PLACE_NAME_BY_CODE
 # ローカル専用のパース系ヘルパーはそのまま再公開（fetch_results から呼ばれる）
 race_id_from_taisen_cache = _local.race_id_from_taisen_cache
 CACHE_DIR = _local.CACHE_DIR
+PATTERN_DIMS = _local.PATTERN_DIMS
+PATTERN_MARKS = _local.PATTERN_MARKS
 
 
 # ---------------------------------------------------------------------------
 # 接続
 # ---------------------------------------------------------------------------
+def _normalize_url(url):
+    """プロジェクトURLを正規化。Data API画面の '.../rest/v1/' を貼っても動くよう除去。"""
+    if not url:
+        return url
+    url = url.strip().rstrip("/")
+    for suffix in ("/rest/v1", "/rest", "/auth/v1"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+    return url.rstrip("/")
+
+
 def _creds():
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_KEY")
-    if url and key:
-        return url, key
-    try:
-        import streamlit as st
-        if "supabase" in st.secrets:
-            s = st.secrets["supabase"]
-            return s.get("url"), s.get("key")
-    except Exception:
-        pass
-    return None, None
+    if not (url and key):
+        try:
+            import streamlit as st
+            if "supabase" in st.secrets:
+                s = st.secrets["supabase"]
+                url = url or s.get("url")
+                key = key or s.get("key")
+        except Exception:
+            pass
+    return _normalize_url(url), key
 
 
 def is_configured():
+    # 強制ローカル（テスト・トラブル時のエスケープ）: KEIBA_FORCE_SQLITE=1
+    if os.environ.get("KEIBA_FORCE_SQLITE"):
+        return False
     u, k = _creds()
     return bool(u and k)
 
@@ -171,7 +187,15 @@ def set_note(uma_id, horse_name, text):
         return
     text = (text or "").strip()
     if not text:
-        _c().table("horse_notes").delete().eq("uma_id", uma_id).execute()
+        try:
+            r = _c().table("horse_notes").select("pattern_json").eq("uma_id", uma_id).limit(1).execute()
+            pj = r.data[0]["pattern_json"] if r.data else None
+        except Exception:
+            pj = None
+        if pj and pj not in ("", "{}"):
+            _c().table("horse_notes").update({"note_text": "", "updated_at": _now()}).eq("uma_id", uma_id).execute()
+        else:
+            _c().table("horse_notes").delete().eq("uma_id", uma_id).execute()
     else:
         _c().table("horse_notes").upsert(
             {"uma_id": uma_id, "horse_name": horse_name, "note_text": text, "updated_at": _now()},
@@ -188,10 +212,76 @@ def get_notes_map(uma_ids):
 
 
 def search_notes(query=""):
-    q = _c().table("horse_notes").select("uma_id,horse_name,note_text,updated_at")
-    if query:
-        q = q.ilike("horse_name", f"%{query}%")
-    return q.order("updated_at", desc=True).execute().data or []
+    # pattern_json 列が未追加のSupabaseでも落ちないようフォールバック
+    for cols in ("uma_id,horse_name,note_text,pattern_json,updated_at",
+                 "uma_id,horse_name,note_text,updated_at"):
+        try:
+            q = _c().table("horse_notes").select(cols)
+            if query:
+                q = q.ilike("horse_name", f"%{query}%")
+            return q.order("updated_at", desc=True).execute().data or []
+        except Exception:
+            continue
+    return []
+
+
+def get_pattern(uma_id):
+    if not uma_id:
+        return {}
+    try:
+        r = _c().table("horse_notes").select("pattern_json").eq("uma_id", uma_id).limit(1).execute()
+    except Exception:
+        return {}
+    pj = r.data[0]["pattern_json"] if r.data else None
+    if pj:
+        try:
+            return json.loads(pj) or {}
+        except Exception:
+            return {}
+    return {}
+
+
+def set_pattern(uma_id, horse_name, pattern):
+    if not uma_id:
+        return
+    pattern = {k: v for k, v in (pattern or {}).items() if v}
+    try:
+        if not pattern:
+            r = _c().table("horse_notes").select("note_text").eq("uma_id", uma_id).limit(1).execute()
+            note = (r.data[0]["note_text"] if r.data else "") or ""
+            if note.strip():
+                _c().table("horse_notes").update({"pattern_json": None, "updated_at": _now()}).eq("uma_id", uma_id).execute()
+            else:
+                _c().table("horse_notes").delete().eq("uma_id", uma_id).execute()
+        else:
+            _c().table("horse_notes").upsert(
+                {"uma_id": uma_id, "horse_name": horse_name,
+                 "pattern_json": json.dumps(pattern, ensure_ascii=False), "updated_at": _now()},
+                on_conflict="uma_id",
+            ).execute()
+    except Exception as e:
+        print(f"[supabase] set_pattern skipped (pattern_json列が必要): {e}")
+
+
+def get_patterns_map(uma_ids):
+    ids = [u for u in (uma_ids or []) if u]
+    if not ids:
+        return {}
+    try:
+        r = _c().table("horse_notes").select("uma_id,pattern_json").in_("uma_id", ids).execute()
+    except Exception:
+        return {}
+    out = {}
+    for row in (r.data or []):
+        pj = row.get("pattern_json")
+        if pj:
+            try:
+                d = json.loads(pj)
+            except Exception:
+                d = {}
+            if d:
+                out[row["uma_id"]] = d
+    return out
 
 
 def races_for_uma(uma_id):

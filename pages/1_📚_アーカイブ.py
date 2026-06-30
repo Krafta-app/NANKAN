@@ -12,7 +12,10 @@ ui.setup()
 
 st.title("📚 予想アーカイブ")
 
-dates = db.list_dates()
+try:
+    dates = db.list_dates()
+except Exception as e:
+    ui.stop_on_cloud_db_error(e, "予想アーカイブの読み込み")
 if not dates:
     st.info("まだ予想がありません。トップの『予想生成』で作成すると、ここに保存されて見られます。")
     st.stop()
@@ -22,7 +25,10 @@ c1, c2, c3 = st.columns([2, 2, 1])
 with c1:
     sel_date = st.selectbox("開催日", dates, format_func=ui.fmt_date)
 with c2:
-    places = sorted({r["place_code"] for r in db.list_archive(date=sel_date)})
+    try:
+        places = sorted({r["place_code"] for r in db.list_archive(date=sel_date)})
+    except Exception as e:
+        ui.stop_on_cloud_db_error(e, "競馬場一覧の読み込み")
     place_labels = ["すべて"] + [ui.PLACE_BY_CODE.get(p, p) for p in places]
     sel_place_label = st.selectbox("競馬場", place_labels)
 with c3:
@@ -33,7 +39,10 @@ with c3:
         st.rerun()
 
 place_code = None if sel_place_label == "すべて" else ui.PLACE_OPTIONS.get(sel_place_label)
-races = db.list_archive(date=sel_date, place_code=place_code)
+try:
+    races = db.list_archive(date=sel_date, place_code=place_code)
+except Exception as e:
+    ui.stop_on_cloud_db_error(e, "レース一覧の読み込み")
 
 if not races:
     st.warning("該当レースがありません。")
@@ -55,13 +64,18 @@ st.subheader(
 )
 
 horses = db.get_race_horses(sel_key)
-notes_map = db.get_notes_map([h["uma_id"] for h in horses])
+_uma_ids = [h["uma_id"] for h in horses]
+notes_map = db.get_notes_map(_uma_ids)
+patterns_map = db.get_patterns_map(_uma_ids)
 
 tab_pred, tab_result, tab_memo = st.tabs(["🧠 予想", "🏁 結果・的中", "📝 メモ"])
 
 # --- 予想（生成HTMLをそのまま画面内に表示）---
 with tab_pred:
-    html = db.get_cache_html(sel_key)
+    try:
+        html = db.get_cache_html(sel_key)
+    except Exception as e:
+        ui.stop_on_cloud_db_error(e, "予想HTMLの読み込み")
     if html:
         components.html(html, height=850, scrolling=True)
     else:
@@ -89,7 +103,8 @@ with tab_result:
 
 # --- メモ（馬ごと・全レース共通）---
 with tab_memo:
-    st.caption("離れると自動保存。同じ馬は別の日・別レースでも同じメモが出ます。")
+    st.caption("離れると自動保存。同じ馬は別の日・別レースでも同じメモ／好走パターンが出ます。")
+    field = len(horses)
     order = sorted(horses, key=lambda x: (x["umaban"] or x["finish_rank"] or 99))
     for h in order:
         head = f"{ui.circled(h['umaban']) if h['umaban'] else ''} {h['name']}"
@@ -97,5 +112,10 @@ with tab_memo:
             head += f"  [{h['tier']}]"
         if notes_map.get(h["uma_id"]):
             head += "  📝"
-        with st.expander(head, expanded=bool(notes_map.get(h["uma_id"]))):
-            ui.note_editor(h["uma_id"], h["name"], key_prefix=sel_key)
+        ps = ui.pattern_summary(patterns_map.get(h["uma_id"]))
+        if ps:
+            head += f"  ◇{ps}"
+        has_any = bool(notes_map.get(h["uma_id"]) or patterns_map.get(h["uma_id"]))
+        with st.expander(head, expanded=has_any):
+            ctx = ui.gate_label(field, h["umaban"]) if h["umaban"] else None
+            ui.memo_editor(h["uma_id"], h["name"], key_prefix=sel_key, race_ctx=ctx)

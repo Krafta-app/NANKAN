@@ -8,6 +8,7 @@ Supabase の接続情報（環境変数 or .streamlit/secrets.toml の [supabase
 - race_results（着順）と horse_notes（メモ）はローカルSQLiteから
 冪等（何度実行しても重複しない upsert）。
 """
+import json
 import sqlite3
 from collections import defaultdict
 
@@ -46,6 +47,13 @@ def main():
     notes = conn.execute("SELECT * FROM horse_notes").fetchall()
     for nt in notes:
         cloud_db.set_note(nt["uma_id"], nt["horse_name"], nt["note_text"])
+        cols = nt.keys()
+        pj = nt["pattern_json"] if "pattern_json" in cols else None
+        if pj:
+            try:
+                cloud_db.set_pattern(nt["uma_id"], nt["horse_name"], json.loads(pj))
+            except Exception:
+                pass
     print(f"✅ horse_notes を {len(notes)} 件アップロード")
 
     print("🎉 完了。Streamlit Cloud のアプリから見えるはずです。")

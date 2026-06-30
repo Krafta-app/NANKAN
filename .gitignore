@@ -1,5 +1,8 @@
 # 秘密情報（絶対にコミットしない）
 .streamlit/secrets.toml
+vercel_site/.env.local
+vercel_site/.env.*.local
+vercel_site/.vercel/
 
 # ローカル専用データ（クラウドはSupabaseを使う）
 data/

@@ -1,4 +1,5 @@
 #!/bin/zsh
+# 南関競馬AIの予想生成画面を開きます。
 cd -- "$(dirname "$0")"
 
 APP_FILE="main.py"

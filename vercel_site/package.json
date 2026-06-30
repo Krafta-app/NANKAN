@@ -1,0 +1,9 @@
+{
+  "name": "nankan-ai-vercel-site",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "check": "node --check api/_supabase.js && node --check api/config.js && node --check api/races.js && node --check api/race.js && node --check api/notes.js && node --check api/stats.js && node --check public/app.js",
+    "dev": "vercel dev"
+  }
+}

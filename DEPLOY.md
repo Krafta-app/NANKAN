@@ -26,9 +26,12 @@
    → 「Success」と出ればOK（これでデータの入れ物＝表が出来ました）
 6. 鍵を2つ控えます。左メニュー下の **⚙ Project Settings → API** を開く：
    - **Project URL**（`https://…….supabase.co`）をコピーしてメモ
+     ⚠️ 末尾の **`/rest/v1/` は付けない**（`.supabase.co` まで）。付けて貼っても自動で除去します。
    - 少し下の **Project API keys** の中の **`service_role`**（`secret` と書いてある長い文字列）の
      コピーボタンを押してメモ
      ※ `anon` ではなく **`service_role`** の方です。これは秘密のパスワードなので人に見せない。
+
+> 💡 後から機能追加（好走パターン等）した時は、SQL Editor で `supabase/schema.sql` を**もう一度 Run**してください（`if not exists` なので列だけ安全に追加されます）。
 
 ---
 
