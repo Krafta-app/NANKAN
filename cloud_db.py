@@ -448,10 +448,6 @@ def backfill_from_cache():
         return 0
     cutoff_date = _retention_cutoff_date()
     cleanup_old_races(cutoff_date)
-    try:
-        existing = {r["race_key"] for r in _c().table("races").select("race_key").execute().data or []}
-    except Exception:
-        existing = set()
     n = 0
     for path in glob.glob(os.path.join(cache_dir, "*_dify.json")):
         m = _local._FNAME_RE.search(os.path.basename(path))
@@ -461,8 +457,6 @@ def backfill_from_cache():
         if date < cutoff_date:
             continue
         race_key = f"{date}_{place_code}_{race_num}"
-        if race_key in existing:
-            continue
         try:
             with open(path, "r", encoding="utf-8") as f:
                 d = json.load(f)
