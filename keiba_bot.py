@@ -1582,10 +1582,10 @@ DATA_DIR = "2025data"
 JOCKEY_FILE = os.path.join(DATA_DIR, "2025_NARJockey.csv")
 TRAINER_FILE = os.path.join(DATA_DIR, "2025_NankanTrainer.csv")
 POWER_FILE = os.path.join(DATA_DIR, "2025_騎手パワー.xlsx")
-SCORE_POLICY_VERSION = "v20260701_chokyo_rank_total_min10"
+SCORE_POLICY_VERSION = "v20260701_chokyo_rank_all_lines"
 
 # 当日各コース横断の調教上位(赤字)への加点。
-# 同日同コース同メトリクスで10頭以上いる場合のみ、3位以内＝常時、4・5位＝1〜6Rのみ対象。
+# 同日同コース同メトリクスで10頭以上いる場合のみ、5位以内を対象。
 CHOKYO_TOP_BONUS = 5
 CHOKYO_TOP_MIN_GROUP_SIZE = 10
 
@@ -1911,9 +1911,9 @@ def _training_threshold(table, course, is_main_track):
 def _compute_day_chokyo_red(entries):
     """当日生成した全レースを横断し、同一(日・調教コース・メトリクス)グループ内でタイムが速い順に順位付け。
     同一グループ10頭以上の時だけ対象。
-    3位以内は常に「調教上位(赤字＋加点)」、4・5位は1〜6R(低級)に入った場合のみ赤字＋加点とする。
-    entries: [{r_num, umaban, key, time}] / key=(date,(course,is_main),metric)
-    Returns: {(r_num, umaban): {"rank": rank, "total": group_size}}"""
+    5位以内を「調教上位(赤字＋加点)」とする。
+    entries: [{r_num, umaban, key, time, disp, line}] / key=(date,(course,is_main),metric)
+    Returns: {(r_num, umaban): {"rank": rank, "total": group_size, "line": line, "disp": disp}}"""
     groups = {}
     for e in entries or []:
         if e.get("key") is None or e.get("time") is None:
@@ -1928,8 +1928,19 @@ def _compute_day_chokyo_red(entries):
         grp.sort(key=lambda e: (float(e["time"]), int(e["r_num"]), int(e["umaban"])))
         for i, e in enumerate(grp):
             rank = i + 1
-            if rank <= 3 or (rank <= 5 and int(e["r_num"]) <= 6):
-                red[(int(e["r_num"]), str(e["umaban"]))] = {"rank": rank, "total": group_size}
+            if rank <= 5:
+                k = (int(e["r_num"]), str(e["umaban"]))
+                info = {
+                    "rank": rank,
+                    "total": group_size,
+                    "line": e.get("line"),
+                    "disp": e.get("disp"),
+                    "time": e.get("time"),
+                    "metric": e.get("metric"),
+                }
+                old = red.get(k)
+                if not old or int(rank) < int(old.get("rank") or 99):
+                    red[k] = info
     return red
 
 
@@ -1953,8 +1964,12 @@ def _apply_chokyo_red_to_ai(ai_text, red_here):
             if isinstance(info, dict):
                 rank = info.get("rank")
                 total = info.get("total")
+                target_line = info.get("line")
             else:
-                rank, total = info, None
+                rank, total, target_line = info, None, None
+            if target_line and line.rstrip() != str(target_line).rstrip():
+                out.append(line)
+                continue
             rank_note = f"{rank}位/{total}頭" if total else f"{rank}位"
             out.append(f"[[RB]]{line.rstrip()} ({rank_note})[[/RB]]")
         else:
@@ -2027,16 +2042,27 @@ def _awase_partner_rank(a_part, base_rank, class_ranks):
 def _parse_kon_chokyo_for_ranking(line):
     """『今走調教：…』行から (date_key, (course, is_main_track), time_value, metric) を取り出す。
     metric は 1F(9.5–13.9) があればそれを優先、なければ 3F(33.0–41.0) を用いる。"""
+    entries = _parse_kon_chokyo_entries_for_ranking(line)
+    if entries:
+        e = entries[0]
+        return (e["date"], e["course_key"], e["time"], e["metric"])
+    return None
+
+
+def _parse_kon_chokyo_entries_for_ranking(line):
+    """『今走調教：…』行から同日横断比較用の候補を返す。
+    同じ日・同じ調教コースで、1F(9.5–13.9) と 3F(33.0–41.0) は別グループで比較する。
+    """
     if not line or "今走調教" not in line:
-        return None
+        return []
     m_d = re.search(r'(\d{1,2})/(\d{1,2})', line)
     if not m_d:
-        return None
+        return []
     date_key = f"{int(m_d.group(1)):02d}/{int(m_d.group(2)):02d}"
 
     course, is_main = _extract_training_course(line)
     if not course:
-        return None
+        return []
 
     nums = []
     for s in re.findall(r'(\d{1,3}\.\d)', line):
@@ -2053,11 +2079,26 @@ def _parse_kon_chokyo_for_ranking(line):
         elif 33.0 <= n <= 41.0:
             three_f_val = n
 
+    out = []
     if one_f_val is not None:
-        return (date_key, (course, is_main), one_f_val, '1F')
+        out.append({
+            "date": date_key,
+            "course_key": (course, is_main),
+            "time": one_f_val,
+            "metric": "1F",
+            "disp": f"{course}{one_f_val:.1f}",
+            "line": line.rstrip(),
+        })
     if three_f_val is not None:
-        return (date_key, (course, is_main), three_f_val, '3F')
-    return None
+        out.append({
+            "date": date_key,
+            "course_key": (course, is_main),
+            "time": three_f_val,
+            "metric": "3F",
+            "disp": f"{course}{three_f_val:.1f}",
+            "line": line.rstrip(),
+        })
+    return out
 
 
 def _build_kon_chokyo_marks(per_race_ai_text, num_races_total):
@@ -2071,18 +2112,18 @@ def _build_kon_chokyo_marks(per_race_ai_text, num_races_total):
         lines = (text or "").split('\n')
         per_race_lines[r_num] = lines
         for idx, line in enumerate(lines):
-            parsed = _parse_kon_chokyo_for_ranking(line)
-            if parsed is None:
+            parsed_entries = _parse_kon_chokyo_entries_for_ranking(line)
+            if not parsed_entries:
                 continue
-            d_key, c_key, t_val, metric = parsed
-            all_entries.append({
-                "race_num": r_num,
-                "idx": idx,
-                "date": d_key,
-                "course_key": c_key,
-                "time": t_val,
-                "metric": metric,
-            })
+            for parsed in parsed_entries:
+                all_entries.append({
+                    "race_num": r_num,
+                    "idx": idx,
+                    "date": parsed["date"],
+                    "course_key": parsed["course_key"],
+                    "time": parsed["time"],
+                    "metric": parsed["metric"],
+                })
 
     if not all_entries:
         return {r: '\n'.join(per_race_lines[r]) for r in per_race_lines}
@@ -2122,14 +2163,16 @@ def _build_kon_chokyo_marks(per_race_ai_text, num_races_total):
         rank_disp = None
         total_disp = None
         if (num_races_total >= 2 and g_total >= CHOKYO_TOP_MIN_GROUP_SIZE
-                and g_rank is not None and g_rank <= 3):
+                and g_rank is not None and g_rank <= 5):
             kind = 'RB'
             rank_disp = g_rank
             total_disp = g_total
         elif p_total >= 3 and p_rank == 1:
             kind = 'B'
         if kind:
-            line_marks[(e["race_num"], e["idx"])] = (kind, rank_disp, total_disp)
+            old = line_marks.get((e["race_num"], e["idx"]))
+            if not old or (rank_disp or 99) < (old[1] or 99):
+                line_marks[(e["race_num"], e["idx"])] = (kind, rank_disp, total_disp)
 
     out = {}
     for r_num, lines in per_race_lines.items():
@@ -4864,6 +4907,7 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
         chokyo_rank_key = None   # (date, (course,is_main), metric) ＝ 同コース同メトリクスで順位付け
         chokyo_rank_time = None  # 順位付けに使う実タイム（1F優先→無ければ3F）
         chokyo_rank_disp = ""    # 例: 大井12.3 / 大井37.0
+        chokyo_rank_entries = [] # 今走調教の全行から抽出した同日横断ランキング素材
 
         chokyo_tanpyo = "なし"
         m_tanpyo = re.search(r'【短評】([^\n]+)', cyokyo_text)
@@ -5006,6 +5050,10 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
                     score_4 += 1
         
         if kon_lines:
+            for _line in kon_lines:
+                for _e in _parse_kon_chokyo_entries_for_ranking("今走調教：" + _line):
+                    chokyo_rank_entries.append(_e)
+
             clean_kon = re.sub(r'\d{1,2}/\d{1,2}\s+', '', kon_lines[-1])
             parts_s = clean_kon.split('/')
             
@@ -5037,15 +5085,14 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
                     is_fast_time = True
 
                 # 当日各コース横断の調教上位ランキング用キーを控える（同コース・同メトリクスで順位付け）。
+                # 互換用に代表1件も残すが、実際の横比較は chokyo_rank_entries の全件で行う。
                 if t_3f is not None and t_3f < 900 and c_name_norm in standard_times:
                     chokyo_time_disp = f"{c_name_norm}{t_3f:.1f}"
-                if kon_lines:
-                    _kr = _parse_kon_chokyo_for_ranking("今走調教：" + kon_lines[-1])
-                    if _kr:
-                        _dk, _ck, _tv, _metric = _kr
-                        chokyo_rank_key = (_dk, _ck, _metric)
-                        chokyo_rank_time = _tv
-                        chokyo_rank_disp = f"{_ck[0]}{_tv:.1f}"
+                if chokyo_rank_entries:
+                    _best_e = sorted(chokyo_rank_entries, key=lambda e: (0 if e.get("metric") == "1F" else 1, float(e.get("time") or 999)))[0]
+                    chokyo_rank_key = (_best_e["date"], _best_e["course_key"], _best_e["metric"])
+                    chokyo_rank_time = _best_e["time"]
+                    chokyo_rank_disp = _best_e.get("disp") or f"{_best_e['course_key'][0]}{_best_e['time']:.1f}"
 
             is_kakushita_awase = False
             if a_part == "単走":
@@ -5121,6 +5168,7 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
             "chokyo_rank_key": chokyo_rank_key,
             "chokyo_rank_time": chokyo_rank_time,
             "chokyo_rank_disp": chokyo_rank_disp,
+            "chokyo_rank_entries": chokyo_rank_entries,
             "score_chokyo_top": 0,
             "relative_tier": relative_tiers.get(umaban),
             "has_no_relative": has_no_relative,
@@ -8879,13 +8927,25 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
 
                 # 当日各コース横断の調教上位(赤字＋加点)の集計用に、今走調教の順位キーを控える。
                 for _u, _sd in scored_data.items():
-                    if _sd.get("chokyo_rank_key") is None:
+                    entries = _sd.get("chokyo_rank_entries") or []
+                    if entries:
+                        for _e in entries:
+                            day_chokyo.append({
+                                "r_num": int(r_num), "umaban": str(_u),
+                                "key": (_e.get("date"), _e.get("course_key"), _e.get("metric")),
+                                "time": _e.get("time"),
+                                "disp": _e.get("disp"),
+                                "line": _e.get("line"),
+                                "metric": _e.get("metric"),
+                            })
                         continue
-                    day_chokyo.append({
-                        "r_num": int(r_num), "umaban": str(_u),
-                        "key": _sd.get("chokyo_rank_key"),
-                        "time": _sd.get("chokyo_rank_time"),
-                    })
+                    if _sd.get("chokyo_rank_key") is not None:
+                        day_chokyo.append({
+                            "r_num": int(r_num), "umaban": str(_u),
+                            "key": _sd.get("chokyo_rank_key"),
+                            "time": _sd.get("chokyo_rank_time"),
+                            "disp": _sd.get("chokyo_rank_disp"),
+                        })
                 # 確定後にループ後段で再採点・再描画するための素材を控える（赤字加点の先読み用）。
                 day_chokyo_pending[int(r_num)] = {
                     "race_key": f"{year}{month}{day}_{place_code}_{r_num}",
@@ -8981,6 +9041,8 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                             sd["score_chokyo_top"] = CHOKYO_TOP_BONUS
                             sd["chokyo_red_rank"] = rk
                             sd["chokyo_red_total"] = total
+                            if isinstance(info, dict) and info.get("disp"):
+                                sd["chokyo_rank_disp"] = info.get("disp")
                     rb = _rebuild_race_with_chokyo(p, red_here)
                     uma_ids_map = {h.get("name"): h.get("uma_id", "") for h in p["horses"].values() if h.get("name")}
                     try:
