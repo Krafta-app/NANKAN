@@ -290,7 +290,7 @@ function renderEval() {
   const wrap = document.createElement("div");
   wrap.className = "eval-panel";
 
-  const lines = text.split("\n").map((line) => line.replace(/^【評価一覧】\s*/, "")).filter((line) => line.trim());
+  const lines = text.split("\n").map((line) => line.replace(/^【(?:総合評価|評価一覧)】\s*/, "")).filter((line) => line.trim());
   for (const line of lines) {
     const row = document.createElement("div");
     row.className = "eval-line";
@@ -818,14 +818,14 @@ function demoRaces(date, place) {
     {
       race_key: "20260629_10_10", date: "20260629", place_code: "10", place_name: "大井",
       race_num: 10, race_name: "サンプル特別", dist: "1400", course: "ダ1400m", post_time: "20:10",
-      eval_list_text: "【評価一覧】  S[1]  A[2]  B[3]  C[4]\n🕰️注目(当日調教上位)： [[R]][1][[/R]](大井36.3 当日1位) [[R]][3][[/R]](船橋37.1 当日3位)",
+      eval_list_text: "【総合評価】  S[1]  A[2]  B[3]  C[4]\n🕰️： [[R]][1](大井36.3 1位/35頭)[[/R]] [[R]][3](船橋37.1 3位/22頭)[[/R]]",
       has_result: true, generated_at: "2026-06-29T18:30:00",
       uma_ids: { サンプルスター: "demo-1", ミナミノライト: "demo-2", カワサキロード: "demo-3", ウラワノカゼ: "demo-4" },
     },
     {
       race_key: "20260629_10_11", date: "20260629", place_code: "10", place_name: "大井",
       race_num: 11, race_name: "メインレース", dist: "1600", course: "ダ1600m", post_time: "20:50",
-      eval_list_text: "【評価一覧】  S[1]  A[2]",
+      eval_list_text: "【総合評価】  S[1]  A[2]",
       has_result: false, generated_at: "2026-06-29T18:42:00",
       uma_ids: { サンプルスター: "demo-1", ミナミノライト: "demo-2" },
     },
@@ -853,7 +853,7 @@ function demoRace(raceKey) {
 function demoHtml(race) {
   return `<!doctype html><html><body>
     <div class="sticky-top">
-      <div class="eval-bar">【評価一覧】  S[1]  A[2]  B[3]  C[4]</div>
+      <div class="eval-bar">【総合評価】  S[1]  A[2]  B[3]  C[4]</div>
       <div class="tabs"></div>
     </div>
     <div id="tab-pace" class="tab-content"><div class="content-box"><pre>【展開予想】\nハナは[1]サンプルスター。番手に[3]。\nMペース想定。</pre></div></div>
