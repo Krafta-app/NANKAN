@@ -146,14 +146,18 @@ h1 {
 
 .control-band {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
   align-items: end;
-  padding: 10px 12px;
+  padding: 14px 16px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: rgba(255, 253, 250, 0.88);
   box-shadow: var(--shadow);
+}
+
+.control-band label {
+  min-width: 0;
 }
 
 label span {
@@ -175,8 +179,9 @@ textarea {
 
 select {
   width: 100%;
-  height: 40px;
-  padding: 0 10px;
+  height: 48px;
+  padding: 0 12px;
+  font-size: 16px;
 }
 
 .metric-strip {
@@ -843,10 +848,13 @@ tr:last-child td {
 }
 
 .memo-card {
-  padding: 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: #fff;
+}
+
+.memo-card[open] {
+  box-shadow: 0 6px 18px rgba(56, 45, 30, 0.08);
 }
 
 .memo-head {
@@ -854,7 +862,36 @@ tr:last-child td {
   align-items: start;
   justify-content: space-between;
   gap: 8px;
+  min-height: 58px;
+  padding: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.memo-head::-webkit-details-marker {
+  display: none;
+}
+
+.memo-head::after {
+  content: "＋";
+  display: grid;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  font-weight: 900;
+}
+
+.memo-card[open] .memo-head {
   margin-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.memo-card[open] .memo-head::after {
+  content: "−";
 }
 
 .memo-head strong {
@@ -864,6 +901,31 @@ tr:last-child td {
 .memo-head span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.memo-head-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.memo-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 7px;
+  border: 1px solid rgba(31, 107, 75, 0.28);
+  border-radius: 999px;
+  background: var(--green-2);
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.memo-body {
+  padding: 0 12px 12px;
 }
 
 textarea {
@@ -879,6 +941,10 @@ textarea {
   gap: 8px;
   align-items: center;
   margin: 8px 0;
+}
+
+.pattern-box {
+  margin-top: 10px;
 }
 
 .pattern-row b {
@@ -1005,7 +1071,7 @@ textarea {
 
   /* 開催日・競馬場はスマホでも横並びを維持 */
   .control-band {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .eval-aside {
@@ -1041,6 +1107,20 @@ textarea {
 
   .tab-panel {
     padding: 10px;
+  }
+
+  .control-band {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  label span {
+    font-size: 13px;
+  }
+
+  select {
+    height: 48px;
+    padding: 0 10px;
   }
 
   .prediction-toolbar {

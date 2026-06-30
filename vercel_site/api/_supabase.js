@@ -196,6 +196,23 @@ function parseJsonField(value, fallback = {}) {
   }
 }
 
+function formatDateKeyJst(date) {
+  const parts = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${byType.year}${byType.month}${byType.day}`;
+}
+
+function dateDaysAgoJst(days) {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - Number(days || 0));
+  return formatDateKeyJst(date);
+}
+
 function compactRace(row) {
   if (!row) return null;
   return {
@@ -282,6 +299,7 @@ module.exports = {
   buildHorses,
   cleanPattern,
   compactRace,
+  dateDaysAgoJst,
   getConfig,
   handleOptions,
   parseJsonField,

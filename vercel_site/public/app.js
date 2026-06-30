@@ -127,6 +127,11 @@ async function loadRaces(preserveRace = false) {
     }
 
     state.dates = data.dates || [];
+    if (state.currentDate && state.dates.length && !state.dates.includes(state.currentDate)) {
+      state.currentDate = data.latestDate || state.dates[0] || "";
+      state.currentRaceKey = "";
+      return loadRaces(false);
+    }
     if (!state.currentDate && data.latestDate) {
       state.currentDate = data.latestDate;
       return loadRaces(preserveRace);
@@ -483,11 +488,6 @@ function renderMemo() {
   }
   const container = document.createElement("div");
 
-  const hint = document.createElement("div");
-  hint.className = "memo-hint";
-  hint.innerHTML = "メモは今回の点数には影響しません。<b>好走パターン（◯/✕）は次走以降の採点に±5</b>として反映され、本文メモは出走馬分析の厩舎コメント下に表示されます。";
-  container.appendChild(hint);
-
   const grid = document.createElement("div");
   grid.className = "memo-grid";
   for (const horse of detail.horses || []) {
@@ -517,24 +517,32 @@ function renderMemo() {
 function createMemoCard(horse) {
   const note = state.raceDetail?.notes?.[horse.uma_id]?.note_text || "";
   const pattern = { ...(state.raceDetail?.patterns?.[horse.uma_id] || {}) };
-  const card = document.createElement("article");
+  const hasMemo = note.trim() || Object.values(pattern).some(Boolean);
+  const card = document.createElement("details");
   card.className = "memo-card";
   card.innerHTML = `
-    <div class="memo-head">
+    <summary class="memo-head">
       <div>
         <strong>${escapeHtml(horse.umaban ? `${horse.umaban} ${horse.name}` : horse.name)}</strong>
         <span>${escapeHtml([horse.tier, horse.finish_rank ? `${horse.finish_rank}着` : "", horse.popularity ? `${horse.popularity}人気` : ""].filter(Boolean).join(" / "))}</span>
       </div>
-      ${tierBadge(horse.tier)}
-    </div>
+      <div class="memo-head-right">
+        ${hasMemo ? '<span class="memo-status">メモ有</span>' : ""}
+        ${tierBadge(horse.tier)}
+      </div>
+    </summary>
   `;
+
+  const body = document.createElement("div");
+  body.className = "memo-body";
 
   const textarea = document.createElement("textarea");
   textarea.value = note;
   textarea.placeholder = "メモ（次走時に厩舎コメント下へ表示）";
-  card.appendChild(textarea);
+  body.appendChild(textarea);
 
   const patternBox = document.createElement("div");
+  patternBox.className = "pattern-box";
   for (const dim of state.config?.patternDims || ["逃げ", "番手", "内枠", "中枠", "外枠"]) {
     const row = document.createElement("div");
     row.className = "pattern-row";
@@ -558,7 +566,7 @@ function createMemoCard(horse) {
     row.append(label, group);
     patternBox.appendChild(row);
   }
-  card.appendChild(patternBox);
+  body.appendChild(patternBox);
 
   const save = document.createElement("button");
   save.type = "button";
@@ -566,7 +574,8 @@ function createMemoCard(horse) {
   save.textContent = state.config?.memoEnabled ? "保存" : "保存不可";
   save.disabled = !state.config?.memoEnabled || !horse.uma_id;
   save.addEventListener("click", () => void saveMemo(horse, textarea, card, save));
-  card.appendChild(save);
+  body.appendChild(save);
+  card.appendChild(body);
 
   return card;
 }

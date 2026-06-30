@@ -18,6 +18,7 @@ race_id_from_taisen_cache = _local.race_id_from_taisen_cache
 CACHE_DIR = _local.CACHE_DIR
 PATTERN_DIMS = _local.PATTERN_DIMS
 PATTERN_MARKS = _local.PATTERN_MARKS
+RACE_RETENTION_DAYS = 7
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +72,35 @@ def _c():
 
 def _now():
     return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _retention_cutoff_date():
+    jst_now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+    cutoff = jst_now.date() - datetime.timedelta(days=RACE_RETENTION_DAYS)
+    return cutoff.strftime("%Y%m%d")
+
+
+def cleanup_old_races(cutoff_date=None):
+    """1週間より古いレース本体を削除する。horse_notes は馬単位なので残す。"""
+    cutoff_date = cutoff_date or _retention_cutoff_date()
+    try:
+        rows = _c().table("races").select("race_key").lt("date", cutoff_date).execute().data or []
+    except Exception as e:
+        print(f"[supabase] cleanup skipped: {e}")
+        return 0
+    keys = [r["race_key"] for r in rows if r.get("race_key")]
+    if not keys:
+        return 0
+    for table in ("race_pages", "race_results", "horse_marks"):
+        try:
+            _c().table(table).delete().in_("race_key", keys).execute()
+        except Exception as e:
+            print(f"[supabase] cleanup {table} skipped: {e}")
+    try:
+        _c().table("races").delete().in_("race_key", keys).execute()
+    except Exception as e:
+        print(f"[supabase] cleanup races skipped: {e}")
+    return len(keys)
 
 
 def init_db():
@@ -416,6 +446,8 @@ def backfill_from_cache():
     cache_dir = _local.CACHE_DIR
     if not os.path.isdir(cache_dir):
         return 0
+    cutoff_date = _retention_cutoff_date()
+    cleanup_old_races(cutoff_date)
     try:
         existing = {r["race_key"] for r in _c().table("races").select("race_key").execute().data or []}
     except Exception:
@@ -426,6 +458,8 @@ def backfill_from_cache():
         if not m:
             continue
         date, place_code, race_num = m.group(1), m.group(2), int(m.group(3))
+        if date < cutoff_date:
+            continue
         race_key = f"{date}_{place_code}_{race_num}"
         if race_key in existing:
             continue
