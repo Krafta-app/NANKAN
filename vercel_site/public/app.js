@@ -14,6 +14,7 @@ const state = {
 
 const els = {};
 const PIN_KEY = "nankan_site_pin";
+let predictionControlsAbort = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   cacheElements();
@@ -300,33 +301,24 @@ function renderPrediction() {
     `;
 
     const actions = toolbar.querySelector(".prediction-actions");
-    const tallButton = makeToolButton("縦長", "高さを広げる");
     const focusButton = makeToolButton("集中", "予想だけ大きく見る");
     const openButton = makeToolButton("別窓", "別ウィンドウで開く");
     const downloadButton = makeToolButton("HTML保存", "HTMLを保存する");
-    actions.append(tallButton, focusButton, openButton, downloadButton);
+    actions.append(focusButton, openButton, downloadButton);
 
-    const iframe = document.createElement("iframe");
-    iframe.className = "prediction-frame";
-    iframe.setAttribute("sandbox", "allow-scripts allow-same-origin");
-    iframe.srcdoc = enhancePredictionHtml(html);
-    iframe.addEventListener("load", () => resizeFrame(iframe));
+    const inline = document.createElement("div");
+    inline.className = "prediction-inline";
+    renderInlinePredictionHtml(inline, html, detail.race);
 
-    tallButton.addEventListener("click", () => {
-      wrap.classList.toggle("is-tall");
-      tallButton.classList.toggle("active", wrap.classList.contains("is-tall"));
-      resizeFrame(iframe);
-    });
     focusButton.addEventListener("click", () => {
       wrap.classList.toggle("is-focus");
       document.body.classList.toggle("prediction-focus-open", wrap.classList.contains("is-focus"));
       focusButton.textContent = wrap.classList.contains("is-focus") ? "戻る" : "集中";
-      resizeFrame(iframe);
     });
     openButton.addEventListener("click", () => openPredictionHtml(html));
     downloadButton.addEventListener("click", () => downloadPredictionHtml(detail.race, html));
 
-    wrap.append(toolbar, iframe);
+    wrap.append(toolbar, inline);
     els.panelPrediction.appendChild(wrap);
   } else if (text) {
     const pre = document.createElement("pre");
@@ -336,6 +328,206 @@ function renderPrediction() {
   } else {
     renderEmpty(els.panelPrediction, "予想HTMLなし", "race_pages に data_html が保存されていません。");
   }
+}
+
+function renderInlinePredictionHtml(target, html, race) {
+  if (predictionControlsAbort) predictionControlsAbort.abort();
+  predictionControlsAbort = new AbortController();
+
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const scriptText = [...doc.querySelectorAll("script")].map((script) => script.textContent || "").join("\n");
+  const markPrefix = parseScriptValue(scriptText, /MARK_PREFIX\s*=\s*'([^']*)'/) || "";
+  const singleRaceNum = parseScriptValue(scriptText, /keiba_mark_([^'"+]+)_/) || race?.race_num || "";
+
+  target.replaceChildren();
+  for (const node of [...doc.body.childNodes]) {
+    if (node.nodeName.toLowerCase() === "script" || node.nodeName.toLowerCase() === "style") continue;
+    target.appendChild(document.importNode(node, true));
+  }
+  target.querySelectorAll("style,script").forEach((node) => node.remove());
+  target.querySelectorAll("[onclick]").forEach((node) => {
+    node.dataset.originalOnclick = node.getAttribute("onclick") || "";
+    node.removeAttribute("onclick");
+  });
+  target.querySelectorAll("a[href]").forEach((link) => {
+    link.target = "_blank";
+    link.rel = "noopener";
+  });
+
+  bindInlinePredictionControls(target, {
+    markPrefix,
+    singleRaceNum: String(singleRaceNum),
+    raceNum: String(race?.race_num || singleRaceNum || ""),
+    signal: predictionControlsAbort.signal,
+  });
+}
+
+function bindInlinePredictionControls(root, context) {
+  root.querySelectorAll(".tab-button").forEach((button) => {
+    const tabName = inlineCallArg(button, /openTab\([^,]+,\s*'([^']+)'/) || tabIdFromButton(button);
+    if (!tabName) return;
+    button.addEventListener("click", (event) => openInlineTab(root, event.currentTarget, tabName, context.raceNum), {
+      signal: context.signal,
+    });
+  });
+
+  root.querySelectorAll(".race-tab").forEach((button) => {
+    const raceId = inlineCallArg(button, /openRace\([^,]+,\s*'([^']+)'/) || button.id?.replace(/^btn-/, "");
+    if (!raceId) return;
+    button.addEventListener("click", (event) => openInlineRace(root, event.currentTarget, raceId), {
+      signal: context.signal,
+    });
+  });
+
+  root.querySelectorAll(".inner-tab").forEach((button) => {
+    const tabId = inlineCallArg(button, /openInnerTab\([^,]+,\s*'([^']+)'/) || tabIdFromButton(button);
+    if (!tabId) return;
+    button.addEventListener("click", (event) => openInlineInnerTab(event.currentTarget, tabId), {
+      signal: context.signal,
+    });
+  });
+
+  root.querySelectorAll(".mark-btn").forEach((button) => {
+    button.addEventListener(
+      "click",
+      (event) => {
+        event.stopPropagation();
+        openInlineMarkMenu(root, event.currentTarget);
+      },
+      { signal: context.signal },
+    );
+  });
+
+  root.querySelectorAll("#mark-menu .menu-item").forEach((item) => {
+    const mark = item.textContent.trim() === "--" ? "" : item.textContent.trim().replace("✕", "");
+    item.addEventListener(
+      "click",
+      (event) => {
+        event.stopPropagation();
+        selectInlineMark(root, mark, context);
+      },
+      { signal: context.signal },
+    );
+  });
+
+  root.addEventListener("click", () => closeInlineMarkMenu(root), { signal: context.signal });
+  restoreInlineTabs(root, context);
+  syncInlineMarks(root, context);
+}
+
+function openInlineTab(root, button, tabName, raceNum) {
+  root.querySelectorAll(".tab-content").forEach((content) => content.classList.remove("active"));
+  root.querySelectorAll(".tab-button").forEach((tabButton) => tabButton.classList.remove("active"));
+  root.querySelector(`#${cssEscape(tabName)}`)?.classList.add("active");
+  button.classList.add("active");
+  if (raceNum) localStorage.setItem(`keiba_active_tab_${raceNum}`, tabName);
+}
+
+function openInlineRace(root, button, raceId) {
+  root.querySelectorAll(".race-content").forEach((content) => content.classList.remove("active"));
+  root.querySelectorAll(".race-tab").forEach((tabButton) => tabButton.classList.remove("active"));
+  root.querySelector(`#${cssEscape(raceId)}`)?.classList.add("active");
+  button.classList.add("active");
+  localStorage.setItem("keiba_combined_race", raceId);
+}
+
+function openInlineInnerTab(button, tabId) {
+  const parent = button.closest(".race-content");
+  if (!parent) return;
+  parent.querySelectorAll(".inner-content").forEach((content) => content.classList.remove("active"));
+  parent.querySelectorAll(".inner-tab").forEach((tabButton) => tabButton.classList.remove("active"));
+  parent.querySelector(`#${cssEscape(tabId)}`)?.classList.add("active");
+  button.classList.add("active");
+  localStorage.setItem(`keiba_inner_${parent.id}`, tabId);
+}
+
+function openInlineMarkMenu(root, button) {
+  const menu = root.querySelector("#mark-menu");
+  if (!menu) return;
+  root.querySelectorAll(".mark-btn.current").forEach((item) => item.classList.remove("current"));
+  button.classList.add("current");
+  const rect = button.getBoundingClientRect();
+  const maxLeft = Math.max(8, window.innerWidth - 292);
+  menu.style.display = "flex";
+  menu.style.top = `${rect.bottom + 6}px`;
+  menu.style.left = `${Math.max(8, Math.min(maxLeft, rect.left))}px`;
+}
+
+function selectInlineMark(root, mark, context) {
+  const button = root.querySelector(".mark-btn.current");
+  if (!button) return;
+  const raceNum = button.dataset.race || context.singleRaceNum || context.raceNum;
+  const uma = button.dataset.uma;
+  if (!raceNum || !uma) return;
+  const key = `${context.markPrefix}keiba_mark_${raceNum}_${uma}`;
+  if (mark) localStorage.setItem(key, mark);
+  else localStorage.removeItem(key);
+  syncInlineMarks(root, context);
+  closeInlineMarkMenu(root);
+}
+
+function closeInlineMarkMenu(root) {
+  root.querySelectorAll(".mark-btn.current").forEach((item) => item.classList.remove("current"));
+  const menu = root.querySelector("#mark-menu");
+  if (menu) menu.style.display = "none";
+}
+
+function syncInlineMarks(root, context) {
+  root.querySelectorAll(".mark-btn").forEach((button) => {
+    const raceNum = button.dataset.race || context.singleRaceNum || context.raceNum;
+    const uma = button.dataset.uma;
+    const saved = raceNum && uma ? localStorage.getItem(`${context.markPrefix}keiba_mark_${raceNum}_${uma}`) : "";
+    button.dataset.mark = saved || "";
+    button.textContent = saved || "";
+  });
+}
+
+function restoreInlineTabs(root, context) {
+  const savedTab = context.raceNum ? localStorage.getItem(`keiba_active_tab_${context.raceNum}`) : "";
+  const tabButton = savedTab ? findInlineButton(root, ".tab-button", savedTab) : root.querySelector(".tab-button.active");
+  if (tabButton) tabButton.click();
+
+  const savedRace = localStorage.getItem("keiba_combined_race");
+  const raceButton = savedRace ? findInlineButton(root, ".race-tab", savedRace) : root.querySelector(".race-tab.active, .race-tab");
+  if (raceButton) raceButton.click();
+
+  root.querySelectorAll(".race-content").forEach((raceContent) => {
+    const savedInner = localStorage.getItem(`keiba_inner_${raceContent.id}`);
+    const innerButton = savedInner
+      ? findInlineButton(raceContent, ".inner-tab", savedInner)
+      : raceContent.querySelector(".inner-tab.active, .inner-tab");
+    if (innerButton) innerButton.click();
+  });
+}
+
+function findInlineButton(root, selector, targetId) {
+  return [...root.querySelectorAll(selector)].find((button) => button.dataset.targetId === targetId || buttonMatchesArg(button, targetId));
+}
+
+function tabIdFromButton(button) {
+  return button.dataset.targetId || "";
+}
+
+function buttonMatchesArg(button, targetId) {
+  const text = button.getAttribute("data-original-onclick") || button.outerHTML;
+  return text.includes(`'${targetId}'`);
+}
+
+function inlineCallArg(node, pattern) {
+  const source = node.dataset.originalOnclick || node.getAttribute("onclick") || "";
+  const value = parseScriptValue(source, pattern);
+  if (value) node.dataset.targetId = value;
+  node.dataset.originalOnclick = source;
+  return value;
+}
+
+function parseScriptValue(text, pattern) {
+  return String(text || "").match(pattern)?.[1] || "";
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) return CSS.escape(value);
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
 }
 
 function makeToolButton(label, title) {
@@ -739,22 +931,6 @@ function enhancePredictionHtml(html) {
   `;
   if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${style}</head>`);
   return `<!doctype html><html><head><meta charset="utf-8">${style}</head><body>${html}</body></html>`;
-}
-
-function resizeFrame(iframe) {
-  try {
-    const doc = iframe.contentDocument;
-    const wrap = iframe.closest(".prediction-viewer");
-    const maxHeight = wrap?.classList.contains("is-focus")
-      ? Math.max(760, window.innerHeight - 116)
-      : wrap?.classList.contains("is-tall")
-        ? 4200
-        : 2600;
-    const height = Math.max(680, Math.min(maxHeight, (doc?.documentElement?.scrollHeight || 0) + 24));
-    iframe.style.height = `${height}px`;
-  } catch {
-    iframe.style.height = "900px";
-  }
 }
 
 function openPredictionHtml(html) {
