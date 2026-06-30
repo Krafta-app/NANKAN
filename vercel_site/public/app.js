@@ -320,6 +320,8 @@ function evalLineHtml(line, noted) {
   });
   // 当日横断の調教上位は赤字（🕰️注目欄）。エンジンが [[R]]…[[/R]] で囲む。
   h = h.replace(/\[\[R\]\]/g, '<span class="chokyo-red">').replace(/\[\[\/R\]\]/g, "</span>");
+  // 実タイム等の括弧は半分くらいの小さい字（[[SMALL]]…[[/SMALL]]）。
+  h = h.replace(/\[\[SMALL\]\]/g, '<small class="chokyo-detail">').replace(/\[\[\/SMALL\]\]/g, "</small>");
   return h;
 }
 

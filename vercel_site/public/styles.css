@@ -1249,6 +1249,12 @@ textarea {
   font-weight: 900;
 }
 
+/* 🕰️注目欄の実タイム/順位の括弧（例: (大井36.0 1位/11頭)）は半分くらいの小さい字 */
+.chokyo-detail {
+  font-size: 0.6em;
+  font-weight: 400;
+}
+
 /* 出走馬分析の今走調教：当日横断で同条件3位以内（…(1位/20頭)付き）は赤字 */
 .chokyo-top3 {
   color: #c0392b;

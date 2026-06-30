@@ -7963,9 +7963,9 @@ def build_evaluation_list(grades, horses_data, scored_data=None):
             flags = d.get("flags", [])
             if any("絶好調教" in f for f in flags) or any("基準超" in f for f in flags):
                 t_info = d.get("chokyo_time_info", "")
-                t_str = f"({t_info})" if t_info else ""
-                # 馬番を赤字化（[[R]]…[[/R]] は Vercel/Mac HTML 双方が赤表示）。
-                chumoku_items.append(f"[[R]][{u}][[/R]]{t_str}")
+                # 基準超(絶好調教)は赤字にしない。赤字はTOP3のみ。実タイムは小さく表示。
+                t_str = f"[[SMALL]]({t_info})[[/SMALL]]" if t_info else ""
+                chumoku_items.append(f"[{u}]{t_str}")
             if d.get("tataki_second"):
                 detail = d.get("tataki_second_detail", "")
                 d_str = f"({detail})" if detail else ""
@@ -7981,7 +7981,8 @@ def build_evaluation_list(grades, horses_data, scored_data=None):
             disp = d.get("chokyo_rank_disp") or d.get("chokyo_time_disp") or ""
             rank_note = f"{rk}位/{total}頭" if total else f"{rk}位"
             d_str = f"({disp} {rank_note})" if disp else f"({rank_note})"
-            red_items.append((int(rk), int(u) if str(u).isdigit() else 99, f"[[R]][{u}]{d_str}[[/R]]"))
+            # TOP3は赤字。実タイム/順位の括弧は半分くらいの小さい字で表示。
+            red_items.append((int(rk), int(u) if str(u).isdigit() else 99, f"[[R]][{u}][[SMALL]]{d_str}[[/SMALL]][[/R]]"))
 
         if chumoku_items:
             eval_text += f"\n🕰️： {' '.join(chumoku_items)}"
@@ -8153,6 +8154,7 @@ def generate_html_output(year, month, day, place_name, r_num, header1, pace_text
         .chokyo-fast {{ font-weight: bold; color: #111; }}
         .chokyo-top3 {{ font-weight: bold; color: #c0392b; }}
         .chokyo-red {{ font-weight: bold; color: #d0021b; }}
+        .chokyo-detail {{ font-size: 0.6em; font-weight: normal; }}
         .race-content-label {{ font-size: 0.85em; font-weight: bold; color: #4d5b2c; }}
         .race-content-text {{ font-size: 0.82em; color: #3f4a2a; background: #fbfcf2; border-left: 3px solid #a3b35c; padding: 6px 8px; border-radius: 4px; margin: 3px 0 8px; }}
         .jockey-line {{ display: block; font-size: 0.82em; color: #555; line-height: 1.35; margin: 1px 0 3px; }}
@@ -8192,7 +8194,7 @@ def generate_html_output(year, month, day, place_name, r_num, header1, pace_text
 
     <div class="sticky-top">
         <div class="header"><h2>{year}/{month}/{day} {place_name}{r_num}R</h2><p>{html.escape(header1)}</p></div>
-        <div class="eval-bar">{format_rank_text(eval_list_text.replace(chr(10), "　")).replace('[[R]]', '<span class="chokyo-red">').replace('[[/R]]', '</span>')}</div>
+        <div class="eval-bar">{format_rank_text(eval_list_text.replace(chr(10), "　")).replace('[[R]]', '<span class="chokyo-red">').replace('[[/R]]', '</span>').replace('[[SMALL]]', '<small class="chokyo-detail">').replace('[[/SMALL]]', '</small>')}</div>
         <div class="tabs">
             <button class="tab-button active" onclick="openTab(event, 'tab-pace')">展開</button>
             <button class="tab-button" onclick="openTab(event, 'tab-index')">相対評価</button>
@@ -8538,6 +8540,7 @@ def generate_combined_html(year, month, day, place_name, race_results):
         .chokyo-fast {{ font-weight: bold; color: #111; }}
         .chokyo-top3 {{ font-weight: bold; color: #c0392b; }}
         .chokyo-red {{ font-weight: bold; color: #d0021b; }}
+        .chokyo-detail {{ font-size: 0.6em; font-weight: normal; }}
         .race-content-label {{ font-size: 0.85em; font-weight: bold; color: #4d5b2c; }}
         .race-content-text {{ font-size: 0.82em; color: #3f4a2a; background: #fbfcf2; border-left: 3px solid #a3b35c; padding: 6px 8px; border-radius: 4px; margin: 3px 0 8px; }}
         .jockey-line {{ display: block; font-size: 0.82em; color: #555; line-height: 1.35; margin: 1px 0 3px; }}
