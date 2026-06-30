@@ -1160,6 +1160,11 @@ textarea {
   font-size: 12px;
 }
 
+.chokyo-red {
+  color: #d0021b;
+  font-weight: 900;
+}
+
 .eval-line {
   padding: 6px 0;
   font-family: "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif;

@@ -1584,6 +1584,9 @@ TRAINER_FILE = os.path.join(DATA_DIR, "2025_NankanTrainer.csv")
 POWER_FILE = os.path.join(DATA_DIR, "2025_騎手パワー.xlsx")
 SCORE_POLICY_VERSION = "v20260629_score_floor_pace_stable_note"
 
+# 当日各コース横断の調教上位(赤字)への加点。3位以内＝常時、4・5位＝1〜6R(低級)のみ赤字＆加点。
+CHOKYO_TOP_BONUS = 5
+
 # ==================================================
 # secrets 読み込み
 # ==================================================
@@ -1903,6 +1906,85 @@ def _training_threshold(table, course, is_main_track):
     return threshold
 
 
+def _compute_day_chokyo_red(entries):
+    """当日生成した全レースを横断し、同一(日・調教コース・メトリクス)グループ内でタイムが速い順に順位付け。
+    3位以内は常に「調教上位(赤字＋加点)」、4・5位は1〜6R(低級)に入った場合のみ赤字＋加点とする。
+    entries: [{r_num, umaban, key, time}] / key=(date,(course,is_main),metric)
+    Returns: {(r_num, umaban): rank}"""
+    groups = {}
+    for e in entries or []:
+        if e.get("key") is None or e.get("time") is None:
+            continue
+        groups.setdefault(e["key"], []).append(e)
+
+    red = {}
+    for grp in groups.values():
+        grp.sort(key=lambda e: (float(e["time"]), int(e["r_num"]), int(e["umaban"])))
+        for i, e in enumerate(grp):
+            rank = i + 1
+            if rank <= 3 or (rank <= 5 and int(e["r_num"]) <= 6):
+                red[(int(e["r_num"]), str(e["umaban"]))] = rank
+    return red
+
+
+def _apply_chokyo_red_to_ai(ai_text, red_here):
+    """出走馬分析テキスト内、対象馬の『今走調教：』行を [[RB]]…(当日N位)[[/RB]] で赤太字にする。
+    red_here: {umaban(str): rank}"""
+    if not red_here or not ai_text:
+        return ai_text
+    out = []
+    cur = None
+    for line in ai_text.split('\n'):
+        hm = re.match(r'^([①-⑳])', line)
+        if hm:
+            cur = str(ord(hm.group(1)) - 0x245f)
+        else:
+            bm = re.match(r'^\[(\d{1,2})\]', line)
+            if bm:
+                cur = bm.group(1)
+        if cur in red_here and '今走調教' in line and '[[' not in line:
+            out.append(f"[[RB]]{line.rstrip()} (当日{red_here[cur]}位)[[/RB]]")
+        else:
+            out.append(line)
+    return '\n'.join(out)
+
+
+def _rebuild_race_with_chokyo(p, red_here):
+    """調教上位(赤字)加点を反映して、1レース分の grades/評価一覧/出走馬分析/HTML/テキストを再生成する。
+    ループ内の確定処理と同じ順序を踏む（scored_data には score_chokyo_top / chokyo_red_rank が設定済み）。"""
+    horses = p["horses"]
+    scored_data = p["scored_data"]
+    ai_out_clean, grades = format_deterministic_evaluation(horses, p["cyokyo"], scored_data, p["danwa"])
+    grades = apply_internal_rank_locks(grades, p["rank_locks"])
+    grades = adjust_grades_by_jockey_choices(grades, horses)
+    grades = apply_score_floor_to_grades(grades, horses, scored_data)
+    grades = ensure_top_grade_presence(grades)
+
+    header_pat = r'^([①-⑳]|[\[]\d{1,2}[\]])([^\s\t　]+)[　\s\t]+([SABCDEFG-])'
+    new_lines = []
+    for line in ai_out_clean.split('\n'):
+        m = re.match(header_pat, line)
+        if m:
+            prefix, hname, old_rank = m.groups()
+            line = f"{prefix}{hname}　{grades.get(_norm_horse_name(hname), old_rank)}"
+        new_lines.append(line)
+    ai_out_clean = '\n'.join(new_lines)
+    ai_out_clean = ensure_race_content_in_ai_detail(ai_out_clean, horses)
+    ai_out_clean = _apply_chokyo_red_to_ai(ai_out_clean, red_here)
+
+    eval_list_text = build_evaluation_list(grades, horses, scored_data)
+    final_html = generate_html_output(
+        p["year"], p["month"], p["day"], p["place_name"], p["r_num"], p["header1"],
+        p["pace_text"], eval_list_text, p["match_txt"], ai_out_clean, p["details_text"], p["index_table_html"],
+    )
+    final_text = (
+        f"📅 {p['year']}/{p['month']}/{p['day']} {p['place_name']}{p['r_num']}R\n\n"
+        f"{p['header1']}\n\n{p['pace_text']}\n\n{eval_list_text}\n\n{p['match_txt']}\n\n"
+        f"【相対評価】\n{p['index_table_html']}\n\n【出走馬分析】\n{ai_out_clean}\n\n{p['details_text']}"
+    )
+    return {"grades": grades, "ai": ai_out_clean, "eval": eval_list_text, "html": final_html, "text": final_text}
+
+
 def _awase_partner_rank(a_part, base_rank, class_ranks):
     """併せ相手のクラスを class_ranks の序列値に変換する。
     調教テキストのクラスは全角(例「（Ｂ２）」)なので半角化してから照合する
@@ -2040,6 +2122,8 @@ def _build_kon_chokyo_marks(per_race_ai_text, num_races_total):
     for r_num, lines in per_race_lines.items():
         new_lines = list(lines)
         for idx, original in enumerate(lines):
+            if '[[' in original:   # 既に当日調教上位(赤字)等でマーク済みの行は二重化しない
+                continue
             mark = line_marks.get((r_num, idx))
             if not mark:
                 continue
@@ -4761,7 +4845,13 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
     for umaban, horse_data in horses_data.items():
         flags = []
         cyokyo_text = cyokyo_data.get(umaban, "")
-        
+
+        # 当日各コース横断の調教上位（赤字）集計用。今走調教のコース/メトリクス/タイムを控える。
+        chokyo_time_disp = ""    # 例: 大井36.5（3F、🕰️表示用）
+        chokyo_rank_key = None   # (date, (course,is_main), metric) ＝ 同コース同メトリクスで順位付け
+        chokyo_rank_time = None  # 順位付けに使う実タイム（1F優先→無ければ3F）
+        chokyo_rank_disp = ""    # 例: 大井12.3 / 大井37.0
+
         chokyo_tanpyo = "なし"
         m_tanpyo = re.search(r'【短評】([^\n]+)', cyokyo_text)
         if m_tanpyo:
@@ -4932,7 +5022,18 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
                     score_4 += 10
                     flags.append("【基準超】")
                     is_fast_time = True
-            
+
+                # 当日各コース横断の調教上位ランキング用キーを控える（同コース・同メトリクスで順位付け）。
+                if t_3f is not None and t_3f < 900 and c_name_norm in standard_times:
+                    chokyo_time_disp = f"{c_name_norm}{t_3f:.1f}"
+                if kon_lines:
+                    _kr = _parse_kon_chokyo_for_ranking("今走調教：" + kon_lines[-1])
+                    if _kr:
+                        _dk, _ck, _tv, _metric = _kr
+                        chokyo_rank_key = (_dk, _ck, _metric)
+                        chokyo_rank_time = _tv
+                        chokyo_rank_disp = f"{_ck[0]}{_tv:.1f}"
+
             is_kakushita_awase = False
             if a_part == "単走":
                 score_4 += 2
@@ -5002,6 +5103,12 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
             "score_6": 0,
             "flags": list(dict.fromkeys(flags)),
             "chokyo_tanpyo": chokyo_tanpyo,
+            "chokyo_time_disp": chokyo_time_disp,
+            "chokyo_time_info": chokyo_time_disp,
+            "chokyo_rank_key": chokyo_rank_key,
+            "chokyo_rank_time": chokyo_rank_time,
+            "chokyo_rank_disp": chokyo_rank_disp,
+            "score_chokyo_top": 0,
             "relative_tier": relative_tiers.get(umaban),
             "has_no_relative": has_no_relative,
             "is_newcomer": is_newcomer,
@@ -5185,7 +5292,8 @@ def _deterministic_total(sc):
     s6 = int(sc.get("score_6", 0) or 0)
     sp = int(sc.get("score_pace", 0) or 0)   # ⑦展開加点(ペース加点＋競馬場×距離の前有利加点)
     spt = int(sc.get("score_pattern", 0) or 0)  # 好走パターン(ユーザーメモ)による±5
-    return s2 + s3 + s4 + s5 + s6 + sp + spt
+    sct = int(sc.get("score_chokyo_top", 0) or 0)  # 当日各コース調教上位(赤字)への加点
+    return s2 + s3 + s4 + s5 + s6 + sp + spt + sct
 
 
 def _format_pattern_short(pattern):
@@ -5302,13 +5410,15 @@ def format_deterministic_evaluation(horses_data: dict, cyokyo_data: dict, scored
         pace_disp = f" ⑦展開{sp}" if sp else ""
         spt = int(sc.get("score_pattern", 0) or 0)
         pat_disp = f" 好走{'+' if spt > 0 else ''}{spt}" if spt else ""
+        sct = int(sc.get("score_chokyo_top", 0) or 0)
+        chokyo_top_disp = f" 調教上位+{sct}" if sct else ""
         tier = sc.get("relative_tier")
         rel_label = sc.get("no_relative_grade") or (f"相対{_rel_label_display(tier)}" if tier else "相対不明")
 
         block = f"{circled_num}{horse_name}　{rank}\n"
         block += f"騎:{jockey_disp}　{jockey_stats}\n"
         block += f"【結論:計{total}点】\n"
-        block += f"【内訳】⑤{rel_label}={s5} ④調教{s4} ②騎手{s2} ⑥対戦{s6} ③盛返{s3}{pace_disp}{pat_disp}\n"
+        block += f"【内訳】⑤{rel_label}={s5} ④調教{s4} ②騎手{s2} ⑥対戦{s6} ③盛返{s3}{pace_disp}{pat_disp}{chokyo_top_disp}\n"
         block += f"{flags} 「{comment}」\n" if flags else f"「{comment}」\n"
         block += f"【調教】\n{cyokyo_display}\n"
         block += f"🐎レース内容\n{race_content}\n"
@@ -7700,11 +7810,24 @@ def build_evaluation_list(grades, horses_data, scored_data=None):
                 d_str = f"({detail})" if detail else ""
                 tataki_items.append(f"[{u}]{d_str}")
         
+        # 当日各コース調教上位(赤字)。[[R]]…[[/R]] でVercel/HTML側が赤表示する。
+        red_items = []
+        for u, d in scored_data.items():
+            rk = d.get("chokyo_red_rank")
+            if not rk:
+                continue
+            disp = d.get("chokyo_rank_disp") or d.get("chokyo_time_disp") or ""
+            d_str = f"({disp} 当日{rk}位)" if disp else f"(当日{rk}位)"
+            red_items.append((int(rk), int(u) if str(u).isdigit() else 99, f"[[R]][{u}][[/R]]{d_str}"))
+
         if chumoku_items:
             eval_text += f"\n🕰️： {' '.join(chumoku_items)}"
+        if red_items:
+            red_items.sort()
+            eval_text += f"\n🕰️注目(当日調教上位)： {' '.join(t for _, _, t in red_items)}"
         if tataki_items:
             eval_text += f"\n叩2： {' '.join(tataki_items)}"
-            
+
     return eval_text
 
 def generate_html_output(year, month, day, place_name, r_num, header1, pace_text, eval_list_text, match_txt, ai_out_clean, details_text, index_table_html="(相対評価データなし)"):
@@ -7866,6 +7989,7 @@ def generate_html_output(year, month, day, place_name, r_num, header1, pace_text
         .chokyo-text {{ font-size: 0.8em; color: #666; background: #f8f9fa; padding: 6px; border-radius: 4px; margin: 3px 0 8px; }}
         .chokyo-fast {{ font-weight: bold; color: #111; }}
         .chokyo-top3 {{ font-weight: bold; color: #c0392b; }}
+        .chokyo-red {{ font-weight: bold; color: #d0021b; }}
         .race-content-label {{ font-size: 0.85em; font-weight: bold; color: #4d5b2c; }}
         .race-content-text {{ font-size: 0.82em; color: #3f4a2a; background: #fbfcf2; border-left: 3px solid #a3b35c; padding: 6px 8px; border-radius: 4px; margin: 3px 0 8px; }}
         .jockey-line {{ display: block; font-size: 0.82em; color: #555; line-height: 1.35; margin: 1px 0 3px; }}
@@ -7905,7 +8029,7 @@ def generate_html_output(year, month, day, place_name, r_num, header1, pace_text
 
     <div class="sticky-top">
         <div class="header"><h2>{year}/{month}/{day} {place_name}{r_num}R</h2><p>{html.escape(header1)}</p></div>
-        <div class="eval-bar">{format_rank_text(eval_list_text.replace(chr(10), "　"))}</div>
+        <div class="eval-bar">{format_rank_text(eval_list_text.replace(chr(10), "　")).replace('[[R]]', '<span class="chokyo-red">').replace('[[/R]]', '</span>')}</div>
         <div class="tabs">
             <button class="tab-button active" onclick="openTab(event, 'tab-pace')">展開</button>
             <button class="tab-button" onclick="openTab(event, 'tab-index')">相対評価</button>
@@ -8250,6 +8374,7 @@ def generate_combined_html(year, month, day, place_name, race_results):
         .chokyo-text {{ font-size: 0.8em; color: #666; background: #f8f9fa; padding: 6px; border-radius: 4px; margin: 3px 0 8px; }}
         .chokyo-fast {{ font-weight: bold; color: #111; }}
         .chokyo-top3 {{ font-weight: bold; color: #c0392b; }}
+        .chokyo-red {{ font-weight: bold; color: #d0021b; }}
         .race-content-label {{ font-size: 0.85em; font-weight: bold; color: #4d5b2c; }}
         .race-content-text {{ font-size: 0.82em; color: #3f4a2a; background: #fbfcf2; border-left: 3px solid #a3b35c; padding: 6px 8px; border-radius: 4px; margin: 3px 0 8px; }}
         .jockey-line {{ display: block; font-size: 0.82em; color: #555; line-height: 1.35; margin: 1px 0 3px; }}
@@ -8449,6 +8574,8 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
         r_nums = sorted(set(r_nums)) or list(range(1, 13))
 
         os.makedirs("cache", exist_ok=True)
+        day_chokyo = []          # 当日各コース横断の今走調教ランキング素材 [{r_num,umaban,key,time}]
+        day_chokyo_pending = {}  # r_num -> 再採点・再描画用の素材一式
         for r_num in r_nums:
             if target_races and r_num not in target_races:
                 continue
@@ -8732,6 +8859,29 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                 match_txt = _fetch_matchup_table_selenium(driver, nk_id, grades, horses_data=nk_data["horses"], current_course=current_course, current_dist=current_dist)
                 eval_list_text = build_evaluation_list(grades, nk_data["horses"], scored_data)
 
+                # 当日各コース横断の調教上位(赤字＋加点)の集計用に、今走調教の順位キーを控える。
+                for _u, _sd in scored_data.items():
+                    if _sd.get("chokyo_rank_key") is None:
+                        continue
+                    day_chokyo.append({
+                        "r_num": int(r_num), "umaban": str(_u),
+                        "key": _sd.get("chokyo_rank_key"),
+                        "time": _sd.get("chokyo_rank_time"),
+                    })
+                # 確定後にループ後段で再採点・再描画するための素材を控える（赤字加点の先読み用）。
+                day_chokyo_pending[int(r_num)] = {
+                    "race_key": f"{year}{month}{day}_{place_code}_{r_num}",
+                    "cache_file": cache_file, "nk_id": nk_id,
+                    "year": year, "month": month, "day": day,
+                    "place_name": place_name, "place_code": place_code, "r_num": r_num,
+                    "header1": header1, "pace_text": pace_text, "details_text": details_text,
+                    "index_table_html": index_table_html, "match_txt": match_txt,
+                    "horses": nk_data["horses"], "cyokyo": cyokyo, "danwa": danwa,
+                    "scored_data": scored_data, "rank_locks": rank_locks,
+                    "current_course": current_course, "current_dist": current_dist,
+                    "post_time": nk_data['meta'].get('post_time', ''),
+                }
+
                 final_text = (
                     f"📅 {year}/{month}/{day} {place_name}{r_num}R\n\n"
                     f"{header1}\n\n"
@@ -8789,6 +8939,53 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
 
             except Exception as e:
                 yield {"type": "error", "data": f"{r_num}R Error: {e}"}
+
+        # === 当日各コース横断の調教上位(赤字＋加点)を確定 → 該当レースを再採点・再描画して上書き ===
+        # 失敗しても try で握りつぶし、ループ内で出した暫定結果(現行どおり)をそのまま残す。
+        try:
+            red_ranks = _compute_day_chokyo_red(day_chokyo)
+            affected = sorted({rn for (rn, _ub) in red_ranks})
+            if affected:
+                import store as _db
+                for rn in affected:
+                    p = day_chokyo_pending.get(rn)
+                    if not p:
+                        continue
+                    red_here = {ub: rk for (r2, ub), rk in red_ranks.items() if r2 == rn}
+                    for ub, rk in red_here.items():
+                        sd = p["scored_data"].get(ub) or p["scored_data"].get(str(ub))
+                        if sd is not None:
+                            sd["score_chokyo_top"] = CHOKYO_TOP_BONUS
+                            sd["chokyo_red_rank"] = rk
+                    rb = _rebuild_race_with_chokyo(p, red_here)
+                    uma_ids_map = {h.get("name"): h.get("uma_id", "") for h in p["horses"].values() if h.get("name")}
+                    try:
+                        with open(p["cache_file"], "w", encoding="utf-8") as f:
+                            json.dump({
+                                "data_text": rb["text"], "data_html": rb["html"],
+                                "ai_out_clean": rb["ai"], "grades": rb["grades"],
+                                "eval_list_text": rb["eval"], "score_policy": SCORE_POLICY_VERSION,
+                                "race_id": p["nk_id"], "course": p["current_course"],
+                                "dist": str(p["current_dist"]), "post_time": p["post_time"],
+                                "uma_ids": uma_ids_map,
+                            }, f, ensure_ascii=False)
+                    except Exception:
+                        pass
+                    try:
+                        _db.register_race(
+                            race_key=p["race_key"], date=f"{p['year']}{p['month']}{p['day']}",
+                            place_code=str(p["place_code"]), place_name=p["place_name"], race_num=int(p["r_num"]),
+                            race_id=p["nk_id"], course=p["current_course"], dist=str(p["current_dist"]),
+                            race_name=p["header1"].strip(), grades=rb["grades"],
+                            eval_list_text=rb["eval"], uma_ids=uma_ids_map, post_time=p["post_time"],
+                            data_html=rb["html"], data_text=rb["text"],
+                        )
+                    except Exception as _e2:
+                        print(f"  [調教上位] DB上書きスキップ {rn}R: {_e2}")
+                    yield {"type": "result", "race_num": p["r_num"], "data_text": rb["text"], "data_html": rb["html"]}
+                yield {"type": "status", "data": "🏇 当日各コースの調教上位(赤字＋加点)を反映しました"}
+        except Exception as _e:
+            print(f"  [調教上位] 反映スキップ: {_e}")
 
     except Exception as e:
         yield {"type": "error", "data": f"Fatal: {e}"}

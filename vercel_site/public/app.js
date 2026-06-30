@@ -24,8 +24,6 @@ const TAB_PANELS = {
   ai: "panelAi",
   match: "panelMatch",
   memo: "panelMemo",
-  result: "panelResult",
-  stats: "panelStats",
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -39,8 +37,7 @@ function cacheElements() {
   for (const id of [
     "statusLine", "pinBox", "pinInput", "refreshButton",
     "dateSelect", "placeSelect", "raceRail", "raceSummary",
-    "panelPace", "panelIndex", "panelAi", "panelMatch",
-    "panelMemo", "panelResult", "panelStats",
+    "panelPace", "panelIndex", "panelAi", "panelMatch", "panelMemo",
   ]) {
     els[id] = document.getElementById(id);
   }
@@ -81,10 +78,8 @@ async function boot() {
 }
 
 async function refreshAll() {
-  state.stats = null;
   await loadAllNotes();
   await loadRaces(true);
-  if (state.activeTab === "stats") await loadStats();
 }
 
 async function loadConfig() {
@@ -176,24 +171,6 @@ async function loadRace(raceKey) {
     renderAllPanels();
     setStatus("読込エラー");
     renderEmpty(els.raceSummary, "レース詳細を取得できません", err.message);
-  }
-}
-
-async function loadStats() {
-  if (!state.config?.configured && !state.demo) return;
-  renderLoading(els.panelStats, "成績を読み込み中");
-  try {
-    if (state.demo) {
-      state.stats = demoStats();
-    } else {
-      const params = new URLSearchParams();
-      if (state.currentDate) params.set("date", state.currentDate);
-      if (state.currentPlace) params.set("place_code", state.currentPlace);
-      state.stats = await apiGet(`/api/stats?${params.toString()}`);
-    }
-    renderStats();
-  } catch (err) {
-    renderEmpty(els.panelStats, "成績を取得できません", err.message);
   }
 }
 
@@ -289,8 +266,6 @@ function renderAllPanels() {
   renderAi();
   renderSection(els.panelMatch, state.parsed?.matchEl, "対戦表");
   renderMemo();
-  renderResult();
-  if (state.activeTab === "stats") void loadStats();
 }
 
 // 評価一覧を左カラムに常設表示。各馬番に予想印（◎○▲…）ボタンを付ける。
@@ -343,6 +318,8 @@ function evalLineHtml(line, noted) {
     const num = noted.has(String(n)) ? `<strong class="memo-num">[${n}]</strong>` : `[${n}]`;
     return `<span class="eval-chip"><span class="mark-btn" data-uma="${n}"></span>${num}</span>`;
   });
+  // 当日横断の調教上位は赤字（🕰️注目欄）。エンジンが [[R]]…[[/R]] で囲む。
+  h = h.replace(/\[\[R\]\]/g, '<span class="chokyo-red">').replace(/\[\[\/R\]\]/g, "</span>");
   return h;
 }
 
@@ -501,43 +478,6 @@ function syncMarks(uma, mark) {
 function cssEscape(value) {
   if (window.CSS?.escape) return CSS.escape(value);
   return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
-}
-
-function renderResult() {
-  const panel = els.panelResult;
-  const detail = state.raceDetail;
-  if (!detail?.race) {
-    renderEmpty(panel, "結果なし", "レースを選んでください。");
-    return;
-  }
-  if (!detail.race.has_result) {
-    renderEmpty(panel, "結果待ち", "レース後に結果取得が完了すると表示されます。");
-    return;
-  }
-  const table = document.createElement("div");
-  table.className = "table-wrap";
-  table.innerHTML = `
-    <table>
-      <thead><tr><th>着</th><th>馬番</th><th>馬名</th><th>予想</th><th>人気</th><th>着差</th><th>判定</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  `;
-  const tbody = table.querySelector("tbody");
-  for (const horse of detail.horses || []) {
-    const hit = isTopHit(horse);
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${escapeHtml(horse.finish_rank || "-")}</td>
-      <td>${escapeHtml(horse.umaban || "-")}</td>
-      <td><span class="horse-name">${escapeHtml(horse.name || "")}</span></td>
-      <td>${tierBadge(horse.tier)}</td>
-      <td>${escapeHtml(horse.popularity || "-")}</td>
-      <td>${escapeHtml(horse.time_diff ?? "-")}</td>
-      <td>${hit ? '<span class="badge good">的中</span>' : ""}</td>
-    `;
-    tbody.appendChild(tr);
-  }
-  panel.replaceChildren(table);
 }
 
 function renderMemo() {
@@ -726,59 +666,6 @@ async function searchNotes(query) {
   }
 }
 
-function renderStats() {
-  if (!state.stats) {
-    renderLoading(els.panelStats, "成績を読み込み中");
-    return;
-  }
-  const stats = state.stats.stats || {};
-  const races = state.stats.races || [];
-  if (!Object.keys(stats).length) {
-    renderEmpty(els.panelStats, "成績なし", "結果取得済みレースがまだありません。");
-    return;
-  }
-  const wrap = document.createElement("div");
-  wrap.className = "stat-grid";
-
-  const bars = document.createElement("div");
-  bars.className = "bars";
-  for (const [tier, item] of Object.entries(stats)) {
-    const n = item.n || 1;
-    const pct = Math.round((item.fuku / n) * 1000) / 10;
-    const line = document.createElement("div");
-    line.className = "bar-line";
-    line.innerHTML = `
-      <b>${escapeHtml(tier)}</b>
-      <span class="bar-track"><span class="bar-fill" style="width:${Math.max(0, Math.min(100, pct))}%"></span></span>
-      <span>${pct}%</span>
-    `;
-    bars.appendChild(line);
-  }
-
-  const table = document.createElement("div");
-  table.className = "table-wrap";
-  table.innerHTML = `
-    <table>
-      <thead><tr><th>日付</th><th>場</th><th>R</th><th>1着</th><th>S/A</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  `;
-  const tbody = table.querySelector("tbody");
-  for (const race of races) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${escapeHtml(formatDate(race.date))}</td>
-      <td>${escapeHtml(race.place_name || "")}</td>
-      <td>${escapeHtml(race.race_num)}</td>
-      <td>${escapeHtml(race.winner || "")}</td>
-      <td>${escapeHtml(race.hit_label || "")}</td>
-    `;
-    tbody.appendChild(tr);
-  }
-  wrap.append(bars, table);
-  els.panelStats.replaceChildren(wrap);
-}
-
 function showTab(tab) {
   state.activeTab = tab;
   document.querySelectorAll("#raceTabs .tab").forEach((button) => {
@@ -786,7 +673,6 @@ function showTab(tab) {
   });
   document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.remove("active"));
   document.getElementById(TAB_PANELS[tab])?.classList.add("active");
-  if (tab === "stats") void loadStats();
 }
 
 function renderPinState() {
@@ -798,7 +684,7 @@ function renderSetupState() {
   els.raceRail.replaceChildren();
   renderEmpty(els.raceSummary, "未設定", "SUPABASE_URL と SUPABASE_SERVICE_ROLE_KEY を入れてください。");
   renderEmpty(els.panelPace, "接続待ち", "VercelのEnvironment Variables設定後、再デプロイすると表示されます。");
-  for (const id of ["panelIndex", "panelAi", "panelMatch", "panelMemo", "panelResult", "panelStats"]) {
+  for (const id of ["panelIndex", "panelAi", "panelMatch", "panelMemo"]) {
     renderEmpty(els[id], "接続待ち", "Supabase接続後に表示されます。");
   }
 }
@@ -864,10 +750,6 @@ function tierBadge(tier) {
   return `<span class="badge${cls}">${escapeHtml(tier)}</span>`;
 }
 
-function isTopHit(horse) {
-  return ["S", "A", "主力", "一軍"].includes(horse.tier) && Number(horse.finish_rank || 99) <= 3;
-}
-
 function normName(value) {
   return String(value ?? "").replace(/[\s　]/g, "");
 }
@@ -925,7 +807,7 @@ function demoRaces(date, place) {
     {
       race_key: "20260629_10_10", date: "20260629", place_code: "10", place_name: "大井",
       race_num: 10, race_name: "サンプル特別", dist: "1400", course: "ダ1400m", post_time: "20:10",
-      eval_list_text: "【評価一覧】  S[1]  A[2]  B[3]  C[4]",
+      eval_list_text: "【評価一覧】  S[1]  A[2]  B[3]  C[4]\n🕰️注目(当日調教上位)： [[R]][1][[/R]](大井36.3 当日1位) [[R]][3][[/R]](船橋37.1 当日3位)",
       has_result: true, generated_at: "2026-06-29T18:30:00",
       uma_ids: { サンプルスター: "demo-1", ミナミノライト: "demo-2", カワサキロード: "demo-3", ウラワノカゼ: "demo-4" },
     },
@@ -981,14 +863,6 @@ function demoHtml(race) {
     </div></div></div>
     <div id="tab-match" class="tab-content"><div class="content-box"><pre>【対戦表】\n[1]サンプルスター > [2]ミナミノライト</pre></div></div>
   </body></html>`;
-}
-
-function demoStats() {
-  return {
-    ok: true,
-    stats: { S: { n: 8, fuku: 6 }, A: { n: 11, fuku: 6 }, B: { n: 14, fuku: 5 }, C: { n: 18, fuku: 3 } },
-    races: [{ date: "20260629", place_name: "大井", race_num: 10, winner: "サンプルスター", hit_label: "勝ち" }],
-  };
 }
 
 function demoNotes(query) {
