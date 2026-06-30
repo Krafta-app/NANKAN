@@ -2874,41 +2874,41 @@ def calculate_relative_scores(horses_data, current_course, current_dist, r_num):
         if not direct_entries:
             return None
 
-            candidates = []
-            for diff, dt, place, dist, url, rank, u_pas, v_pas in direct_entries:
-                priority = _direct_race_priority(place, dist)
-                if priority:
-                    score = 200 + priority * 10
-                    adj_diff = diff
-                else:
-                    # priority=0 の直接対決fallback もコーナー数一致を必須にする
-                    if not _is_turn_match_to_current(place, dist, current_course, cur_dist):
-                        continue
-                    relaxed_score = _fallback_condition_score(place, dist)
-                    if relaxed_score <= -999:
-                        continue
-                    score = 200 + relaxed_score
-                    adj_diff = diff * 0.55
-                track_factor = _pair_track_factor(u, v, place)
-                adj_diff = adj_diff * track_factor
-                entry = {
-                    "diff": adj_diff,
-                    "is_strict": priority >= 3,
-                    "place": place,
-                    "dist": dist,
-                    "date": dt,
-                    "url": url,
-                    "rank": rank,
-                    "direct_priority": priority,
-                    "fallback_relaxed": priority == 0,
-                    "track_factor": track_factor,
-                    "u_pas": u_pas,
-                    "v_pas": v_pas,
-                }
-                entry = _mark_last_run_surge_entry(entry, url, u, v)
-                if entry.get("last_run_surge"):
-                    score += 60
-                candidates.append((score, rank, dt, entry))
+        candidates = []
+        for diff, dt, place, dist, url, rank, u_pas, v_pas in direct_entries:
+            priority = _direct_race_priority(place, dist)
+            if priority:
+                score = 200 + priority * 10
+                adj_diff = diff
+            else:
+                # priority=0 の直接対決fallback もコーナー数一致を必須にする
+                if not _is_turn_match_to_current(place, dist, current_course, cur_dist):
+                    continue
+                relaxed_score = _fallback_condition_score(place, dist)
+                if relaxed_score <= -999:
+                    continue
+                score = 200 + relaxed_score
+                adj_diff = diff * 0.55
+            track_factor = _pair_track_factor(u, v, place)
+            adj_diff = adj_diff * track_factor
+            entry = {
+                "diff": adj_diff,
+                "is_strict": priority >= 3,
+                "place": place,
+                "dist": dist,
+                "date": dt,
+                "url": url,
+                "rank": rank,
+                "direct_priority": priority,
+                "fallback_relaxed": priority == 0,
+                "track_factor": track_factor,
+                "u_pas": u_pas,
+                "v_pas": v_pas,
+            }
+            entry = _mark_last_run_surge_entry(entry, url, u, v)
+            if entry.get("last_run_surge"):
+                score += 60
+            candidates.append((score, rank, dt, entry))
         if not candidates:
             return None
         candidates.sort(key=lambda x: (-x[0], *_rank_sort_key(x[1], x[2])))
