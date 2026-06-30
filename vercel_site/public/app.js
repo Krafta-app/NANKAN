@@ -286,12 +286,48 @@ function renderPrediction() {
   els.panelPrediction.replaceChildren();
 
   if (html) {
+    const wrap = document.createElement("div");
+    wrap.className = "prediction-viewer";
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "prediction-toolbar";
+    toolbar.innerHTML = `
+      <div>
+        <strong>${escapeHtml(detail.race.place_name || "")}${escapeHtml(detail.race.race_num)}R 予想</strong>
+        <span>${escapeHtml(detail.race.race_name || "")}</span>
+      </div>
+      <div class="prediction-actions"></div>
+    `;
+
+    const actions = toolbar.querySelector(".prediction-actions");
+    const tallButton = makeToolButton("縦長", "高さを広げる");
+    const focusButton = makeToolButton("集中", "予想だけ大きく見る");
+    const openButton = makeToolButton("別窓", "別ウィンドウで開く");
+    const downloadButton = makeToolButton("HTML保存", "HTMLを保存する");
+    actions.append(tallButton, focusButton, openButton, downloadButton);
+
     const iframe = document.createElement("iframe");
     iframe.className = "prediction-frame";
     iframe.setAttribute("sandbox", "allow-scripts allow-same-origin");
     iframe.srcdoc = enhancePredictionHtml(html);
     iframe.addEventListener("load", () => resizeFrame(iframe));
-    els.panelPrediction.appendChild(iframe);
+
+    tallButton.addEventListener("click", () => {
+      wrap.classList.toggle("is-tall");
+      tallButton.classList.toggle("active", wrap.classList.contains("is-tall"));
+      resizeFrame(iframe);
+    });
+    focusButton.addEventListener("click", () => {
+      wrap.classList.toggle("is-focus");
+      document.body.classList.toggle("prediction-focus-open", wrap.classList.contains("is-focus"));
+      focusButton.textContent = wrap.classList.contains("is-focus") ? "戻る" : "集中";
+      resizeFrame(iframe);
+    });
+    openButton.addEventListener("click", () => openPredictionHtml(html));
+    downloadButton.addEventListener("click", () => downloadPredictionHtml(detail.race, html));
+
+    wrap.append(toolbar, iframe);
+    els.panelPrediction.appendChild(wrap);
   } else if (text) {
     const pre = document.createElement("pre");
     pre.className = "text-fallback";
@@ -300,6 +336,15 @@ function renderPrediction() {
   } else {
     renderEmpty(els.panelPrediction, "予想HTMLなし", "race_pages に data_html が保存されていません。");
   }
+}
+
+function makeToolButton(label, title) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "tool-button";
+  button.textContent = label;
+  button.title = title;
+  return button;
 }
 
 function renderResult() {
@@ -680,8 +725,16 @@ function enhancePredictionHtml(html) {
   const style = `
     <style>
       html,body{margin:0;background:#fffdfa;color:#20221f;}
-      body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;}
+      body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;line-height:1.55;}
       table{max-width:100%;}
+      .container,.wrapper,main{max-width:100%!important;}
+      .tabs,.race-tabs,.inner-tabs{position:sticky!important;top:0;z-index:20;}
+      button,.tab,.race-tab,.inner-tab{min-height:34px;}
+      @media (max-width: 720px){
+        body{font-size:14px;}
+        table{font-size:13px;}
+        .tabs,.race-tabs,.inner-tabs{overflow-x:auto;white-space:nowrap;}
+      }
     </style>
   `;
   if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${style}</head>`);
@@ -691,11 +744,40 @@ function enhancePredictionHtml(html) {
 function resizeFrame(iframe) {
   try {
     const doc = iframe.contentDocument;
-    const height = Math.max(680, Math.min(2600, (doc?.documentElement?.scrollHeight || 0) + 24));
+    const wrap = iframe.closest(".prediction-viewer");
+    const maxHeight = wrap?.classList.contains("is-focus")
+      ? Math.max(760, window.innerHeight - 116)
+      : wrap?.classList.contains("is-tall")
+        ? 4200
+        : 2600;
+    const height = Math.max(680, Math.min(maxHeight, (doc?.documentElement?.scrollHeight || 0) + 24));
     iframe.style.height = `${height}px`;
   } catch {
     iframe.style.height = "900px";
   }
+}
+
+function openPredictionHtml(html) {
+  const blob = new Blob([enhancePredictionHtml(html)], { type: "text/html;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  window.open(url, "_blank", "noopener,noreferrer");
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+function downloadPredictionHtml(race, html) {
+  const date = race?.date || "race";
+  const place = race?.place_name || "nankan";
+  const raceNum = race?.race_num || "";
+  const filename = `${date}_${place}${raceNum}R.html`;
+  const blob = new Blob([enhancePredictionHtml(html)], { type: "text/html;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function patternSummary(pattern) {
