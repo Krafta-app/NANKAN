@@ -7940,7 +7940,8 @@ def build_evaluation_list(grades, horses_data, scored_data=None):
             if any("絶好調教" in f for f in flags) or any("基準超" in f for f in flags):
                 t_info = d.get("chokyo_time_info", "")
                 t_str = f"({t_info})" if t_info else ""
-                chumoku_items.append(f"[{u}]{t_str}")
+                # 馬番を赤字化（[[R]]…[[/R]] は Vercel/Mac HTML 双方が赤表示）。
+                chumoku_items.append(f"[[R]][{u}][[/R]]{t_str}")
             if d.get("tataki_second"):
                 detail = d.get("tataki_second_detail", "")
                 d_str = f"({detail})" if detail else ""

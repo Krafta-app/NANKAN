@@ -1249,6 +1249,18 @@ textarea {
   font-weight: 900;
 }
 
+/* 出走馬分析の今走調教：当日横断で同条件3位以内（…(1位/20頭)付き）は赤字 */
+.chokyo-top3 {
+  color: #c0392b;
+  font-weight: 900;
+}
+
+/* 同レース内で最速の調教は濃い太字（赤ではない） */
+.chokyo-fast {
+  color: #111;
+  font-weight: 800;
+}
+
 .eval-line {
   padding: 4px 0;
   font-family: "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif;
