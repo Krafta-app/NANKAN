@@ -2020,6 +2020,23 @@ def _apply_chokyo_red_to_ai(ai_text, red_here):
     return '\n'.join(out)
 
 
+def _relabel_match_grades(match_txt, horses, grades):
+    """対戦表テキスト内、現出走馬の末尾ランク表記 (A)/(B)… を最新gradesへ差し替える。
+    調教加点の反映で総合評価のランクが変わっても、対戦表(生成時に旧gradesで作成)が
+    食い違わないようにする。各セグメントは『N着 [u]馬名(枠)…(ランク)』形式で、
+    ランクは単一の英字カッコなので枠等の他カッコと衝突しない。[u] を起点に照合する。"""
+    if not match_txt:
+        return match_txt
+    out = match_txt
+    for u, h in (horses or {}).items():
+        newg = grades.get(_norm_horse_name((h or {}).get("name", "")))
+        if not newg:
+            continue
+        pat = re.compile(r'(\[' + re.escape(str(u)) + r'\][^/\n]*?)\([SABCDEFG\-]\)')
+        out = pat.sub(lambda m: f"{m.group(1)}({newg})", out)
+    return out
+
+
 def _rebuild_race_with_chokyo(p, red_here):
     """調教上位(赤字)加点を反映して、1レース分の grades/評価一覧/出走馬分析/HTML/テキストを再生成する。
     ループ内の確定処理と同じ順序を踏む（scored_data には score_chokyo_top / chokyo_red_rank が設定済み）。"""
@@ -2043,14 +2060,17 @@ def _rebuild_race_with_chokyo(p, red_here):
     ai_out_clean = ensure_race_content_in_ai_detail(ai_out_clean, horses)
     ai_out_clean = _apply_chokyo_red_to_ai(ai_out_clean, red_here)
 
+    # 対戦表のランク表記も最新gradesへ揃える（総合評価/出走馬分析と食い違わないように）。
+    match_txt = _relabel_match_grades(p.get("match_txt", ""), horses, grades)
+
     eval_list_text = build_evaluation_list(grades, horses, scored_data)
     final_html = generate_html_output(
         p["year"], p["month"], p["day"], p["place_name"], p["r_num"], p["header1"],
-        p["pace_text"], eval_list_text, p["match_txt"], ai_out_clean, p["details_text"], p["index_table_html"],
+        p["pace_text"], eval_list_text, match_txt, ai_out_clean, p["details_text"], p["index_table_html"],
     )
     final_text = (
         f"📅 {p['year']}/{p['month']}/{p['day']} {p['place_name']}{p['r_num']}R\n\n"
-        f"{p['header1']}\n\n{p['pace_text']}\n\n{eval_list_text}\n\n{p['match_txt']}\n\n"
+        f"{p['header1']}\n\n{p['pace_text']}\n\n{eval_list_text}\n\n{match_txt}\n\n"
         f"【相対評価】\n{p['index_table_html']}\n\n【出走馬分析】\n{ai_out_clean}\n\n{p['details_text']}"
     )
     return {"grades": grades, "ai": ai_out_clean, "eval": eval_list_text, "html": final_html, "text": final_text}
@@ -4424,6 +4444,8 @@ def _build_relative_html(G, all_scores, all_tiers, umaban_to_name, name_to_umaba
         place = str(last.get("place", "") or "").strip()
         dist = str(last.get("dist", "") or "").strip()
         pas = str(last.get("pas", "") or "").strip()
+        rank = last.get("rank")
+        pop = last.get("pop")
         cond = f"{place}{dist}" if (place or dist) else ""
         parts = []
         if race_name:
@@ -4434,6 +4456,14 @@ def _build_relative_html(G, all_scores, all_tiers, umaban_to_name, name_to_umaba
             parts.append(cond)
         if pas:
             parts.append(f"通過{pas}")
+        # 人気・着順（取得できていれば）。例: 3人気1着
+        res = ""
+        if pop is not None:
+            res += f"{pop}人気"
+        if rank is not None:
+            res += f"{rank}着"
+        if res:
+            parts.append(res)
         if not parts:
             return ""
         return "前走: " + " ".join(parts)
@@ -8687,8 +8717,45 @@ def generate_index_table(horses_data, pace_speed_list):
 # ==================================================
 # 10. ジェネレータ（全レース処理）
 # ==================================================
+def _cleanup_old_cache(days=7):
+    """予想生成時に、days日より前のローカルcacheファイルを削除する。
+    データはSupabaseに保存済みで、ローカルcacheは短期用途(1時間の再生成スキップ／同期ステージ)
+    に留めるため。ファイル名中の8桁日付(YYYYMMDD)で判定し、cutoff日以前(<=)を削除。
+    日付が読めないファイルは残す。例: 7/8生成時は cutoff=7/1 → 7/1以前を削除。"""
+    import glob as _glob
+    import datetime as _dt
+    try:
+        import store as _st
+        cache_dir = _st.CACHE_DIR
+    except Exception:
+        cache_dir = "cache"
+    if not os.path.isdir(cache_dir):
+        return 0
+    jst_today = (_dt.datetime.utcnow() + _dt.timedelta(hours=9)).date()
+    cutoff = (jst_today - _dt.timedelta(days=days)).strftime("%Y%m%d")
+    removed = 0
+    for path in _glob.glob(os.path.join(cache_dir, "*")):
+        m = re.search(r'(20\d{6})', os.path.basename(path))
+        if not m or m.group(1) > cutoff:
+            continue
+        try:
+            os.remove(path)
+            removed += 1
+        except Exception:
+            pass
+    return removed
+
+
 def run_races_iter(year, month, day, place_code, target_races, mode="dify", manual_kai_nichi=None, bypass_cache=False, **kwargs):
     resources = load_resources()
+
+    # 生成のたびに7日より前の古いローカルcacheを掃除（Supabaseにあるのでローカルは短期のみ）。
+    try:
+        _removed = _cleanup_old_cache(7)
+        if _removed:
+            yield {"type": "status", "data": f"🧹 7日より前の古いキャッシュ {_removed} 件を削除"}
+    except Exception:
+        pass
 
     kb_input_map = {"10": "大井", "11": "川崎", "12": "船橋", "13": "浦和"}
     nk_code_map = {"10": "20", "11": "21", "12": "19", "13": "18"}

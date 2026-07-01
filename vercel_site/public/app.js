@@ -252,11 +252,13 @@ function renderRaceRail() {
       const active = race.race_key === state.currentRaceKey;
       const memo = raceHasMemo(race);
       button.className = `race-button${active ? " active" : ""}${memo ? " has-memo" : ""}`;
-      const meta = [race.dist ? `${race.dist}m` : "", race.post_time || ""].filter(Boolean).join(" · ");
+      // 競馬場の頭文字＋距離（例: 大井1200m → 大1200）。「予想」文字は出さず横長・縦スリムに。
+      const placeInitial = (race.place_name || "").slice(0, 1);
+      const label = `${placeInitial}${race.dist || ""}`;
       button.innerHTML = `
         <strong>${escapeHtml(race.race_num)}R${memo ? '<i class="memo-dot" title="メモ有り"></i>' : ""}</strong>
-        <span class="rb-meta">${escapeHtml(meta || "—")}</span>
-        <span class="rb-state ${race.has_result ? "done" : ""}">${race.has_result ? "結果" : "予想"}</span>
+        <span class="rb-meta">${escapeHtml(label || "—")}</span>
+        ${race.has_result ? '<span class="rb-state done">結果</span>' : ""}
       `;
       button.addEventListener("click", () => void loadRace(race.race_key));
       return button;

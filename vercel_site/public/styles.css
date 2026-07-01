@@ -667,6 +667,23 @@ select {
   font-weight: 900;
 }
 
+/* 相対評価タブ: 馬名の折り返しを解消し、前走データ(人気/着順含む)は馬名の下に
+   横1列・小さい字で表示する。前走spanを100%幅にして次の行へ落とす。 */
+#panelIndex .horse-header {
+  flex-wrap: wrap;
+  align-items: baseline;
+  row-gap: 2px;
+}
+#panelIndex .horse-header > span:not(.mark-btn) {
+  flex-basis: 100%;
+  margin-left: 0 !important;
+  margin-top: 1px;
+  font-size: 11px;
+  color: #777;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
 .prediction-inline .mark-btn {
   display: inline-grid;
   min-width: 22px;
@@ -1162,13 +1179,14 @@ textarea {
 /* ===== レース一覧ボタン（距離・発走時刻・メモ印） ===== */
 .race-button {
   display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 1px;
-  min-width: 92px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  min-width: 0;
   height: auto;
-  min-height: 58px;
-  padding: 7px 11px;
+  min-height: 38px;
+  padding: 6px 12px;
 }
 
 .race-button strong {
@@ -1180,13 +1198,13 @@ textarea {
 
 .race-button .rb-meta {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 700;
   white-space: nowrap;
 }
 
 .race-button .rb-state {
   display: inline-block;
-  margin-top: 2px;
   padding: 0 6px;
   border-radius: 999px;
   background: var(--paper-2);
