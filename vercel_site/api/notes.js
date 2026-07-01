@@ -10,29 +10,50 @@ const {
   supabaseFetch,
 } = require("./_supabase");
 
+// pattern_json 列が未追加の Supabase でも落ちないよう、列ありselectを先に試し、
+// 「column ... does not exist」なら列なしselectでリトライする（Python側と同じ挙動）。
+function isMissingPatternColumn(err) {
+  return /pattern_json/.test(String(err?.message || "")) &&
+    /(does not exist|schema cache|42703|PGRST204)/i.test(String(err?.message || "") + String(err?.data ? JSON.stringify(err.data) : ""));
+}
+
 async function findExisting(umaId) {
-  const rows = await supabaseFetch("horse_notes", {
-    query: {
-      select: "uma_id,horse_name,note_text,pattern_json,updated_at",
-      uma_id: `eq.${umaId}`,
-      limit: "1",
-    },
-  });
-  return rows?.[0] || null;
+  for (const select of [
+    "uma_id,horse_name,note_text,pattern_json,updated_at",
+    "uma_id,horse_name,note_text,updated_at",
+  ]) {
+    try {
+      const rows = await supabaseFetch("horse_notes", {
+        query: { select, uma_id: `eq.${umaId}`, limit: "1" },
+      });
+      return rows?.[0] || null;
+    } catch (err) {
+      if (isMissingPatternColumn(err)) continue;
+      throw err;
+    }
+  }
+  return null;
 }
 
 async function listNotes(queryText) {
-  const query = {
-    select: "uma_id,horse_name,note_text,pattern_json,updated_at",
-    order: "updated_at.desc",
-    limit: "200",
-  };
-  if (queryText) query.horse_name = `ilike.*${String(queryText).replace(/\*/g, "")}*`;
-  const rows = await supabaseFetch("horse_notes", { query });
-  return (rows || []).map((row) => ({
-    ...row,
-    pattern: parseJsonField(row.pattern_json, {}),
-  }));
+  const base = { order: "updated_at.desc", limit: "200" };
+  if (queryText) base.horse_name = `ilike.*${String(queryText).replace(/\*/g, "")}*`;
+  for (const select of [
+    "uma_id,horse_name,note_text,pattern_json,updated_at",
+    "uma_id,horse_name,note_text,updated_at",
+  ]) {
+    try {
+      const rows = await supabaseFetch("horse_notes", { query: { ...base, select } });
+      return (rows || []).map((row) => ({
+        ...row,
+        pattern: parseJsonField(row.pattern_json, {}),
+      }));
+    } catch (err) {
+      if (isMissingPatternColumn(err)) continue;
+      throw err;
+    }
+  }
+  return [];
 }
 
 module.exports = async function handler(req, res) {
@@ -79,12 +100,25 @@ module.exports = async function handler(req, res) {
       updated_at: now,
     };
 
-    const saved = await supabaseFetch("horse_notes", {
-      method: "POST",
-      query: { on_conflict: "uma_id" },
-      headers: { Prefer: "resolution=merge-duplicates,return=representation" },
-      body: payload,
-    });
+    let saved;
+    try {
+      saved = await supabaseFetch("horse_notes", {
+        method: "POST",
+        query: { on_conflict: "uma_id" },
+        headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+        body: payload,
+      });
+    } catch (err) {
+      // pattern_json 列が未追加の場合はテキストメモだけでも保存する（好走パターンはスキップ）。
+      if (!isMissingPatternColumn(err)) throw err;
+      const { pattern_json, ...rest } = payload;
+      saved = await supabaseFetch("horse_notes", {
+        method: "POST",
+        query: { on_conflict: "uma_id" },
+        headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+        body: rest,
+      });
+    }
 
     sendJson(res, 200, { ok: true, note: saved?.[0] || payload, pattern: nextPattern });
   } catch (err) {

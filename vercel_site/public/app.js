@@ -605,7 +605,11 @@ async function saveMemo(horse, textarea, card, saveButton) {
         body: JSON.stringify({ uma_id: horse.uma_id, horse_name: horse.name, note_text: textarea.value, pattern }),
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || "保存に失敗しました");
+      if (!response.ok) {
+        // 原因(detail)も表示する。例: Supabaseの列不足やRLSエラーを見えるように。
+        const detail = payload.detail ? `：${payload.detail}` : "";
+        throw new Error((payload.error || "保存に失敗しました") + detail);
+      }
     }
 
     if (!state.raceDetail.notes) state.raceDetail.notes = {};
