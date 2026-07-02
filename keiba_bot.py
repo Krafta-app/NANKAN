@@ -1582,7 +1582,7 @@ DATA_DIR = "2025data"
 JOCKEY_FILE = os.path.join(DATA_DIR, "2025_NARJockey.csv")
 TRAINER_FILE = os.path.join(DATA_DIR, "2025_NankanTrainer.csv")
 POWER_FILE = os.path.join(DATA_DIR, "2025_騎手パワー.xlsx")
-SCORE_POLICY_VERSION = "v20260701b_chokyo_graduated_capped"
+SCORE_POLICY_VERSION = "v20260702a_chokyo_time_softened"
 
 # 当日各コース横断の調教上位(赤字)への加点。
 # 今走調教(中間追い切り含む)だけを対象に、同日・同じ調教場所・同じメトリクスで10頭以上いる場合のみ、3位以内を対象。
@@ -5202,11 +5202,11 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
                 standard_threshold = _training_threshold(standard_times, c_name_norm, is_main_track)
                 # 一律化: 基準を切れば馬なり/強め/常時速に関係なく一律点。
                 if c_name_norm in super_fast and t_3f <= super_threshold:
-                    score_4 += 16
+                    score_4 += 12
                     flags.append("【絶好調教】")
                     is_fast_time = True
                 elif t_3f < standard_threshold:
-                    score_4 += 10
+                    score_4 += 8
                     flags.append("【基準超】")
                     is_fast_time = True
 
@@ -7950,6 +7950,62 @@ def predict_pace_python(horses_data, danwa_data, current_distance_str, horse_pat
 
     return tenkai_text, speed_data_list, pace_bonus_map
 
+_GRADE_ORDER_ARARE = ['S', 'A', 'B', 'C', 'D', 'E', 'F']
+def _grade_v_arare(g):
+    return _GRADE_ORDER_ARARE.index(g) if g in _GRADE_ORDER_ARARE else 99
+
+
+def compute_arare_index(grades):
+    """相対tier分布だけから「荒れ度」を6カテゴリに分類する（事前オッズ不使用＝予想確定時に出せる）。
+
+    検証(0622-0702/127R・三連複払戻・期間分割)で確認した荒れの構造:
+      - 軸構造ファースト: 最上位tierが1頭に定まる(単独軸)か複数拮抗(軸不定)かで一次分岐。
+      - 単独軸: 相手(軸以外)のtierが≥5種に拡散→紐荒れ(軸は複勝残るが三連複が伸びる/万馬券60%)、
+        ≤3種に集約→堅軸本線(万馬券0%)。相手種類数×配当の相関+0.51。
+      - 軸不定: 上位tier(S/A)2頭のみ=二強波乱(万馬券60%)、5頭以上=上位拮抗堅め(万馬券8%)。
+      ※荒れ2種(紐荒れ/二強)は各5Rと小サンプルで方向は明確だが暫定。堅め/標準は頑健。
+
+    Returns: dict(emoji, name, level, score, reason)
+      level: -1=堅い / 0=標準 / +1=波乱注意 (色分けと閾値判定用)
+    """
+    vals = [g for g in (grades or {}).values() if g]
+    field = len(vals)
+    if field < 3:
+        return {"emoji": "⚪", "name": "判定不可", "level": 0, "score": 0.0, "reason": "頭数不足"}
+    from collections import Counter as _C
+    cnt = _C(vals)
+    nS = cnt.get("S", 0)
+    nA = cnt.get("A", 0)
+    nAplus = nS + nA
+
+    best_v = min(_grade_v_arare(g) for g in vals)
+    best_g = _GRADE_ORDER_ARARE[best_v] if best_v < len(_GRADE_ORDER_ARARE) else "?"
+    top_group = [g for g in vals if _grade_v_arare(g) == best_v]
+    unique_axis = (len(top_group) == 1)
+    rest_ntiers = len(set(g for g in vals if _grade_v_arare(g) != best_v))
+
+    if unique_axis:
+        # 単独軸(最上位1頭)。相手tierの広がりで分岐。
+        if rest_ntiers >= 5:
+            return {"emoji": "🟣", "name": "紐荒れ(軸不動)", "level": 1, "score": 2.0,
+                    "reason": f"軸({best_g})1頭は堅いが相手が{rest_ntiers}種に拡散＝軸1頭ながし妙味"}
+        if rest_ntiers <= 3:
+            return {"emoji": "🟢", "name": "堅軸・本線", "level": -1, "score": -2.0,
+                    "reason": f"軸({best_g})1頭＋相手も{rest_ntiers}種に集約＝買い目を絞れる鉄板構造"}
+        return {"emoji": "🔵", "name": "軸中心", "level": 0, "score": 0.5,
+                "reason": f"軸({best_g})1頭・相手{rest_ntiers}種でやや広い標準戦"}
+    else:
+        # 軸不定(最上位が複数拮抗)。
+        if nAplus == 2:
+            return {"emoji": "🔴", "name": "二強波乱", "level": 1, "score": 4.0,
+                    "reason": "上位2頭に評価集中・軸不定＝どちらか飛ぶと大波乱"}
+        if nAplus >= 5:
+            return {"emoji": "🟢", "name": "上位拮抗・堅め", "level": -1, "score": -3.0,
+                    "reason": f"上位tier{nAplus}頭と厚く実力上位が順当に収まりやすい"}
+        return {"emoji": "🟡", "name": "混戦・標準", "level": 0, "score": 0.0,
+                "reason": "突出馬なくフラットな標準戦"}
+
+
 def build_evaluation_list(grades, horses_data, scored_data=None):
     rank_map = {"S": [], "A": [], "B": [], "C": [], "D": [], "E": [], "無": []}
     
@@ -7985,6 +8041,11 @@ def build_evaluation_list(grades, horses_data, scored_data=None):
             else: parts.append(f"{r}{nums}")
     
     eval_text += "  " + "  ".join(parts)
+
+    _ar = compute_arare_index(grades)
+    if _ar["name"] != "判定不可":
+        _r = f"（{_ar['reason']}）" if _ar.get("reason") else ""
+        eval_text += f"\n荒れ度： {_ar['emoji']}{_ar['name']}{_r}"
 
     if scored_data:
         chumoku_items = []

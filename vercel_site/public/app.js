@@ -169,7 +169,7 @@ async function loadRace(raceKey) {
     state.raceDetail = state.demo ? demoRace(raceKey) : await apiGet(`/api/race?race_key=${encodeURIComponent(raceKey)}`);
     state.parsed = parsePrediction(state.raceDetail);
     renderAllPanels();
-    setStatus(summaryLine());
+    renderRaceHeader();
   } catch (err) {
     state.raceDetail = null;
     state.parsed = null;
@@ -750,6 +750,62 @@ function summaryLine() {
     race.post_time ? `${race.post_time}発走` : "",
   ].filter(Boolean);
   return parts.join("  ");
+}
+
+// 荒れ度6カテゴリ（keiba_bot.compute_arare_index のJS移植・相対tierのみ／事前オッズ不使用）。
+const ARARE_ORDER = ["S", "A", "B", "C", "D", "E", "F"];
+function arareGv(g) {
+  const i = ARARE_ORDER.indexOf(g);
+  return i < 0 ? 99 : i;
+}
+function raceGrades(detail) {
+  const race = detail?.race ?? detail;
+  let g = race?.grades_json ?? race?.grades ?? null;
+  if (typeof g === "string") {
+    try { g = JSON.parse(g); } catch { g = null; }
+  }
+  if (g && typeof g === "object" && Object.keys(g).length) return g;
+  // grades_json 欠損時は出走馬の tier から復元。
+  const horses = detail?.horses ?? detail?.results ?? [];
+  const derived = {};
+  for (const h of horses) {
+    if (h && h.name && h.tier) derived[h.name] = h.tier;
+  }
+  return derived;
+}
+function computeArare(grades) {
+  const vals = Object.values(grades || {}).filter(Boolean);
+  const field = vals.length;
+  if (field < 3) return { emoji: "⚪", name: "判定不可", level: 0, reason: "頭数不足" };
+  const cnt = {};
+  for (const v of vals) cnt[v] = (cnt[v] || 0) + 1;
+  const nAplus = (cnt["S"] || 0) + (cnt["A"] || 0);
+  const bestV = Math.min(...vals.map(arareGv));
+  const bestG = ARARE_ORDER[bestV] ?? "?";
+  const uniqueAxis = vals.filter((v) => arareGv(v) === bestV).length === 1;
+  const restNtiers = new Set(vals.filter((v) => arareGv(v) !== bestV)).size;
+  if (uniqueAxis) {
+    if (restNtiers >= 5) return { emoji: "🟣", name: "紐荒れ(軸不動)", level: 1, reason: `軸(${bestG})1頭は堅いが相手が${restNtiers}種に拡散＝軸1頭ながし妙味` };
+    if (restNtiers <= 3) return { emoji: "🟢", name: "堅軸・本線", level: -1, reason: `軸(${bestG})1頭＋相手も${restNtiers}種に集約＝買い目を絞れる鉄板構造` };
+    return { emoji: "🔵", name: "軸中心", level: 0, reason: `軸(${bestG})1頭・相手${restNtiers}種でやや広い標準戦` };
+  }
+  if (nAplus === 2) return { emoji: "🔴", name: "二強波乱", level: 1, reason: "上位2頭に評価集中・軸不定＝どちらか飛ぶと大波乱" };
+  if (nAplus >= 5) return { emoji: "🟢", name: "上位拮抗・堅め", level: -1, reason: `上位tier${nAplus}頭と厚く実力上位が順当に収まりやすい` };
+  return { emoji: "🟡", name: "混戦・標準", level: 0, reason: "突出馬なくフラットな標準戦" };
+}
+function arareBadgeHtml(detail) {
+  const ar = computeArare(raceGrades(detail));
+  if (ar.name === "判定不可") return "";
+  const lvl = ar.level > 0 ? "hot" : ar.level < 0 ? "cool" : "flat";
+  return `<span class="arare-badge ${lvl}" title="${escapeHtml(ar.reason)}">${ar.emoji}${escapeHtml(ar.name)}</span>`;
+}
+function renderRaceHeader() {
+  const race = state.raceDetail?.race;
+  if (!race || !els.statusLine) {
+    setStatus(summaryLine());
+    return;
+  }
+  els.statusLine.innerHTML = `${escapeHtml(summaryLine())} ${arareBadgeHtml(state.raceDetail)}`;
 }
 
 function formatDate(value) {

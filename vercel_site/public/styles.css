@@ -339,6 +339,36 @@ select {
   color: var(--danger);
 }
 
+.arare-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 8px;
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.arare-badge.hot {
+  border-color: rgba(179, 58, 47, 0.35);
+  background: #fae7e3;
+  color: var(--danger);
+}
+.arare-badge.cool {
+  border-color: rgba(31, 107, 75, 0.35);
+  background: var(--green-2);
+  color: var(--green);
+}
+.arare-badge.flat {
+  border-color: rgba(184, 134, 31, 0.3);
+  background: var(--gold-2);
+  color: #70520d;
+}
+
 .main-panel {
   min-width: 0;
   overflow: hidden;

@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "nankan-site", "runtimeExecutable": "node", "runtimeArgs": ["static_server.js"], "port": 8765 }
+  ]
+}
