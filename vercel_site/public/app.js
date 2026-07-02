@@ -368,8 +368,10 @@ function renderOdds() {
     .join("");
   const umaSort = sortKey === "umaban" ? " is-sorted" : "";
   const oddsSort = sortKey === "odds" ? " is-sorted" : "";
+  const forecast = araBannerHtml(horses);
   panel.innerHTML = `
     <div class="odds-wrap">
+      ${forecast}
       <div class="odds-head">
         <strong>単勝・複勝オッズ</strong>
         <span class="odds-meta">${fetched ? `${escapeHtml(fetched)} 時点` : ""}<button class="odds-refresh" type="button" id="oddsRefreshBtn" title="オッズ再取得">↻</button></span>
@@ -409,6 +411,61 @@ function tierClass(tier) {
   if (tier === "B") return "b";
   if (tier === "C") return "c";
   return "low";
+}
+
+// ===== 三連単 荒れ予報 =====
+// 127R(0622-0702)の実オッズ+三連単払戻で較正。総合評価tier × 人気/単勝オッズ × オッズばらつき(実装確率entropy)を合成。
+// soft(市場フラット度)が三連単万馬券(1万+)を予測(AUC0.72,期間分割で頑健、ロジスティック較正: 予測28/52/73% vs 実測31/52/70%)。
+// 大荒れ(10万+)は1着が中央15.6倍の伏兵勝ちで市場もAIも見抜けず本質的に予測困難(最良でも基準10%→14%)。big scoreは"芽"として控えめに扱う。
+const ARA_CAL = {
+  mkt_entropy: [2.3185, 0.3849], n_sub10: [3.6457, 1.0312], fav_odds: [1.9787, 0.6158],
+  tier_entropy: [1.6527, 0.4775], bottom_heavy: [0.2392, 0.1962], field: [10.063, 2.487],
+};
+function araZ(v, k) { const [m, s] = ARA_CAL[k]; return (v - m) / (s || 1); }
+function araTierV(t) { const i = ["S", "A", "B", "C", "D", "E", "F"].indexOf(t); return i < 0 ? 99 : i; }
+function computeAraForecast(rows) {
+  const withOdds = rows.filter((r) => r.tanshou != null && r.tanshou > 0);
+  const odds = withOdds.map((r) => r.tanshou).slice().sort((a, b) => a - b);
+  const field = rows.length;
+  if (odds.length < 4 || field < 5) return null;
+  const cnt = {};
+  for (const r of rows) { if (r.tier) cnt[r.tier] = (cnt[r.tier] || 0) + 1; }
+  const nDEF = (cnt.D || 0) + (cnt.E || 0) + (cnt.F || 0);
+  const TC = ["S", "A", "B", "C", "D", "E", "F"].map((t) => cnt[t] || 0);
+  const tot = TC.reduce((a, b) => a + b, 0) || 1;
+  const tierEntropy = -TC.reduce((s, c) => (c > 0 ? s + (c / tot) * Math.log2(c / tot) : s), 0);
+  const inv = odds.map((o) => 1 / o);
+  const tt = inv.reduce((a, b) => a + b, 0);
+  const p = inv.map((x) => x / tt);
+  const mktEntropy = -p.reduce((s, x) => (x > 0 ? s + x * Math.log2(x) : s), 0);
+  const favOdds = odds[0];
+  const favRow = withOdds.reduce((a, b) => (a.tanshou <= b.tanshou ? a : b));
+  const favWeak = araTierV(favRow.tier) >= 2 ? 1 : 0;
+  const nSub10 = odds.filter((o) => o < 10).length;
+  const bottomHeavy = nDEF / field;
+  const soft = araZ(mktEntropy, "mkt_entropy") + 0.5 * araZ(nSub10, "n_sub10") + 0.5 * araZ(favOdds, "fav_odds") + 0.4 * favWeak;
+  const pMan = 1 / (1 + Math.exp(-(0.031 + 0.497 * soft))); // 三連単万馬券(1万+)確率
+  let level, emoji, label;
+  if (soft <= -0.8) { level = "cool"; emoji = "🟢"; label = "堅い"; }
+  else if (soft >= 0.7) { level = "hot"; emoji = "🔴"; label = "やや荒れ濃厚"; }
+  else { level = "flat"; emoji = "🟡"; label = "標準"; }
+  const reasons = [];
+  if (favOdds < 1.5) reasons.push(`断然1番人気(${favOdds.toFixed(1)}倍)`);
+  else if (favOdds >= 3.0) reasons.push(`1番人気${favOdds.toFixed(1)}倍と混戦`);
+  else reasons.push(`1番人気${favOdds.toFixed(1)}倍`);
+  reasons.push(`単勝10倍以内${nSub10}頭`);
+  if (favWeak) reasons.push("AIは1番人気を非上位評価");
+  return { soft, pMan, level, emoji, label, reason: reasons.join(" / ") };
+}
+function araBannerHtml(rows) {
+  const f = computeAraForecast(rows);
+  if (!f) return "";
+  const pct = Math.round(f.pMan * 100);
+  return `<div class="ara-banner ${f.level}">
+    <div class="ara-main"><span class="ara-emoji">${f.emoji}</span><span class="ara-label">荒れ予報：${escapeHtml(f.label)}</span></div>
+    <div class="ara-sub"><span class="ara-prob">三連単1万円超 期待度 <b>${pct}%</b></span><span class="ara-reason">${escapeHtml(f.reason)}</span></div>
+    <div class="ara-caveat">※10万超の大荒れは1着が伏兵化する稀な事象で予測困難。本予報は「1万円超になるか」の判定です。</div>
+  </div>`;
 }
 
 // 評価一覧を左カラムに常設表示。各馬番に予想印（◎○▲…）ボタンを付ける。

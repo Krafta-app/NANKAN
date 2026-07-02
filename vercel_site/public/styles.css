@@ -309,6 +309,28 @@ select {
 }
 
 .odds-wrap { display: flex; flex-direction: column; gap: 10px; }
+.ara-banner {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ara-banner.hot { border-color: rgba(179, 58, 47, 0.4); background: #fae7e3; }
+.ara-banner.cool { border-color: rgba(31, 107, 75, 0.4); background: var(--green-2); }
+.ara-banner.flat { border-color: rgba(184, 134, 31, 0.35); background: var(--gold-2); }
+.ara-main { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ara-emoji { font-size: 15px; }
+.ara-label { font-weight: 800; font-size: 15px; }
+.ara-sub { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 12px; color: var(--muted); }
+.ara-prob { font-size: 13px; color: var(--ink); }
+.ara-prob b { font-size: 15px; }
+.ara-reason { flex: 1; min-width: 0; }
+.ara-caveat { font-size: 11px; color: var(--muted); line-height: 1.4; }
+@media (max-width: 620px) {
+  .ara-label { font-size: 14px; }
+}
 .odds-head {
   display: flex;
   align-items: center;
