@@ -1582,7 +1582,7 @@ DATA_DIR = "2025data"
 JOCKEY_FILE = os.path.join(DATA_DIR, "2025_NARJockey.csv")
 TRAINER_FILE = os.path.join(DATA_DIR, "2025_NankanTrainer.csv")
 POWER_FILE = os.path.join(DATA_DIR, "2025_騎手パワー.xlsx")
-SCORE_POLICY_VERSION = "v20260702a_chokyo_time_softened"
+SCORE_POLICY_VERSION = "v20260702b_pace_stable_chokyo_adjust"
 
 # 当日各コース横断の調教上位(赤字)への加点。
 # 今走調教(中間追い切り含む)だけを対象に、同日・同じ調教場所・同じメトリクスで10頭以上いる場合のみ、3位以内を対象。
@@ -2042,6 +2042,25 @@ def _rebuild_race_with_chokyo(p, red_here):
     ループ内の確定処理と同じ順序を踏む（scored_data には score_chokyo_top / chokyo_red_rank が設定済み）。"""
     horses = p["horses"]
     scored_data = p["scored_data"]
+    pace_text = p["pace_text"]
+    if red_here:
+        pace_text, pace_speed_list, pace_bonus_map = predict_pace_python(
+            horses,
+            p["danwa"],
+            p.get("course_text") or p["header1"],
+            horse_patterns=p.get("horse_patterns"),
+            chokyo_front_umabans={str(ub) for ub in red_here},
+        )
+        for sd in scored_data.values():
+            sd.pop("score_pace", None)
+            sd.pop("score_pattern", None)
+        for _u, _b in (pace_bonus_map or {}).items():
+            if str(_u) in scored_data:
+                scored_data[str(_u)]["score_pace"] = _b
+            elif _u in scored_data:
+                scored_data[_u]["score_pace"] = _b
+        apply_pattern_bonus(scored_data, horses, pace_speed_list, p.get("horse_patterns"))
+
     ai_out_clean, grades = format_deterministic_evaluation(horses, p["cyokyo"], scored_data, p["danwa"])
     grades = apply_internal_rank_locks(grades, p["rank_locks"])
     grades = adjust_grades_by_jockey_choices(grades, horses)
@@ -2066,11 +2085,11 @@ def _rebuild_race_with_chokyo(p, red_here):
     eval_list_text = build_evaluation_list(grades, horses, scored_data)
     final_html = generate_html_output(
         p["year"], p["month"], p["day"], p["place_name"], p["r_num"], p["header1"],
-        p["pace_text"], eval_list_text, match_txt, ai_out_clean, p["details_text"], p["index_table_html"],
+        pace_text, eval_list_text, match_txt, ai_out_clean, p["details_text"], p["index_table_html"],
     )
     final_text = (
         f"📅 {p['year']}/{p['month']}/{p['day']} {p['place_name']}{p['r_num']}R\n\n"
-        f"{p['header1']}\n\n{p['pace_text']}\n\n{eval_list_text}\n\n{match_txt}\n\n"
+        f"{p['header1']}\n\n{pace_text}\n\n{eval_list_text}\n\n{match_txt}\n\n"
         f"【相対評価】\n{p['index_table_html']}\n\n【出走馬分析】\n{ai_out_clean}\n\n{p['details_text']}"
     )
     return {"grades": grades, "ai": ai_out_clean, "eval": eval_list_text, "html": final_html, "text": final_text}
@@ -5466,6 +5485,13 @@ def _clean_danwa_text(text):
         return "コメントなし"
     return clean
 
+def _danwa_leading_mark(text):
+    clean = _clean_danwa_text(text)
+    if clean == "コメントなし":
+        return ""
+    m = re.match(r'\s*([◎○◯〇⚪△▲☆★◇◆×✕])', clean)
+    return m.group(1) if m else ""
+
 
 def _deterministic_total(sc):
     """1頭の合計点(最大100＋盛返③上乗せ)。
@@ -6079,6 +6105,21 @@ def get_kb_url_id(year, month, day, place_code, nichi, race_num):
 # ==================================================
 # 7. 競馬ブック（談話/調教）
 # ==================================================
+def _extract_danwa_comment_with_mark(raw_text):
+    text = re.sub(r'\s+', ' ', str(raw_text or "").replace("\xa0", " ")).strip()
+    if not text:
+        return ""
+    dash = re.search(r'[―-]+', text)
+    if not dash:
+        return text
+    before = text[:dash.start()]
+    after = text[dash.end():].strip()
+    mark_m = re.search(r'[◎○◯〇⚪△▲☆★◇◆×✕]', before)
+    mark = mark_m.group(0) if mark_m else ""
+    if mark and after and not after.startswith(mark):
+        return f"{mark} {after}".strip()
+    return after or text
+
 def parse_kb_danwa_cyokyo(driver, kb_id):
     d_danwa, d_cyokyo = {}, {}
     try:
@@ -6109,8 +6150,7 @@ def parse_kb_danwa_cyokyo(driver, kb_id):
             
             if danwa_td:
                 raw_text = danwa_td.get_text(" ", strip=True)
-                m = re.search(r"[―-]+(.*)", raw_text)
-                d_danwa[uma] = m.group(1).strip() if m else raw_text
+                d_danwa[uma] = _extract_danwa_comment_with_mark(raw_text)
 
         driver.get(f"https://s.keibabook.co.jp/chihou/cyokyo/1/{kb_id}")
         time.sleep(1)
@@ -7158,8 +7198,9 @@ def _circled_num(n):
         pass
     return str(n)
 
-def predict_pace_python(horses_data, danwa_data, current_distance_str, horse_patterns=None):
+def predict_pace_python(horses_data, danwa_data, current_distance_str, horse_patterns=None, chokyo_front_umabans=None):
     predictions = []
+    chokyo_front_umabans = {str(u) for u in (chokyo_front_umabans or [])}
     
     dm = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)(?=m)', str(current_distance_str).replace(',', ''))
     curr_dist = int(dm.group(1)) if dm else 1400
@@ -7182,7 +7223,9 @@ def predict_pace_python(horses_data, danwa_data, current_distance_str, horse_pat
     for umaban, data in horses_data.items():
         name = data.get("name", "")
         hist = data.get("hist", [])
-        danwa = danwa_data.get(umaban, "")
+        danwa = danwa_data.get(str(umaban), danwa_data.get(umaban, ""))
+        danwa_mark = _danwa_leading_mark(danwa)
+        is_chokyo_front = str(umaban) in chokyo_front_umabans
         
         weighted_positions = []
         ideal_position = None
@@ -7372,6 +7415,13 @@ def predict_pace_python(horses_data, danwa_data, current_distance_str, horse_pat
 
             est_pos = max(1.0, est_pos)
 
+        # 厩舎談話の先頭が△なら一段控えめ、当日横断の調教3位以内は一段前へ補正する。
+        if danwa_mark == "△":
+            est_pos += 1.0
+        if is_chokyo_front:
+            est_pos -= 1.0
+        est_pos = max(1.0, est_pos)
+
         first_corner_profile = _first_corner_draw_profile(
             hist, today_side, current_place=current_place, current_dist=curr_dist
         ) if _PACE_FIRST_CORNER_DRAW else {
@@ -7403,6 +7453,8 @@ def predict_pace_python(horses_data, danwa_data, current_distance_str, horse_pat
             "first_corner_profile": first_corner_profile,
             "hana_acquisition_score": None,
             "hana_profile_note": "",
+            "danwa_mark": danwa_mark,
+            "chokyo_front_adjust": is_chokyo_front,
         })
 
     predictions.sort(key=lambda x: x["est_pos"])
@@ -7449,7 +7501,7 @@ def predict_pace_python(horses_data, danwa_data, current_distance_str, horse_pat
         is_outer_draw = umaban_int >= 7
         today_side = _draw_side(field_size_today, umaban_int)  # 今回が内/外
         
-        danwa = danwa_data.get(p["umaban"], "")
+        danwa = danwa_data.get(str(p["umaban"]), danwa_data.get(p["umaban"], ""))
         must_lead = bool(re.search(r'(ハナ.*絶対|逃げ.*条件|ハナを切|自分の形|単騎)', danwa)) or p.get("strong_lead_intent", False)
         can_sit_second = bool(re.search(r'(番手.*(いい|競馬|我慢)|控える|溜める|砂を被.*慣れ)', danwa))
         distance_extension = bool(p.get("is_distance_extension"))
@@ -7857,7 +7909,7 @@ def predict_pace_python(horses_data, danwa_data, current_distance_str, horse_pat
         if with_stable_note:
             comment = _clean_danwa_text(_danwa_for_umaban(p["umaban"]))
             if comment != "コメントなし":
-                extras.append(f"厩舎の話：{comment}")
+                extras.append(comment)
         if horse_patterns:
             uid = horses_data.get(str(p["umaban"]), {}).get("uma_id", "")
             ptxt = _format_pattern_short(horse_patterns.get(uid))
@@ -9122,6 +9174,7 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                     "year": year, "month": month, "day": day,
                     "place_name": place_name, "place_code": place_code, "r_num": r_num,
                     "header1": header1, "pace_text": pace_text, "details_text": details_text,
+                    "course_text": nk_data['meta'].get('course', ''), "horse_patterns": horse_patterns,
                     "index_table_html": index_table_html, "match_txt": match_txt,
                     "horses": nk_data["horses"], "cyokyo": cyokyo, "danwa": danwa,
                     "scored_data": scored_data, "rank_locks": rank_locks,
