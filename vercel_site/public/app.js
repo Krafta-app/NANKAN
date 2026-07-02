@@ -13,6 +13,7 @@ const state = {
   activeTab: "pace",
   odds: null,
   oddsLoading: false,
+  oddsSort: "umaban",
   demo: new URLSearchParams(location.search).has("demo"),
 };
 
@@ -329,26 +330,44 @@ function renderOdds() {
     renderEmpty(panel, "オッズ取得不可", data?.error || "発売前、または取得に失敗しました。↻で再取得できます。");
     return;
   }
-  const horses = (data.horses || []).slice().sort((a, b) => a.umaban - b.umaban);
+  const tierByUma = oddsTierMap();
+  const horses = (data.horses || []).slice();
   if (!horses.length) {
     renderEmpty(panel, "オッズなし", "オッズ表を取得できませんでした。");
     return;
   }
+  for (const h of horses) h.tier = tierByUma.get(Number(h.umaban)) || "";
+  // 並び替え: 馬番=昇順 / 単勝=低い順(人気順、欠損は末尾)。
+  const sortKey = state.oddsSort === "odds" ? "odds" : "umaban";
+  horses.sort((a, b) => {
+    if (sortKey === "odds") {
+      const ao = a.tanshou == null ? Infinity : a.tanshou;
+      const bo = b.tanshou == null ? Infinity : b.tanshou;
+      if (ao !== bo) return ao - bo;
+      return a.umaban - b.umaban;
+    }
+    return a.umaban - b.umaban;
+  });
   const fetched = data.fetched_at ? shortDateTime(data.fetched_at) : "";
   const rows = horses
     .map((h) => {
       const tan = h.tanshou != null ? `${h.tanshou.toFixed(1)}` : "－";
-      const nin = h.ninki ? `${h.ninki}番人気` : "－";
+      const nin = h.ninki ? `${h.ninki}` : "－";
       const hot = h.ninki && h.ninki <= 3 ? " odds-fav" : "";
+      const tierChip = h.tier
+        ? `<span class="odds-tier tier-${tierClass(h.tier)}">${escapeHtml(h.tier)}</span>`
+        : "";
       return `<tr class="${hot.trim()}">
         <td class="odds-uma">${escapeHtml(String(h.umaban))}</td>
-        <td class="odds-name">${escapeHtml(h.name || "")}</td>
+        <td class="odds-name"><span class="odds-name-txt">${escapeHtml(h.name || "")}</span>${tierChip}</td>
         <td class="odds-tan">${escapeHtml(tan)}</td>
-        <td class="odds-nin">${escapeHtml(nin)}</td>
+        <td class="odds-nin">${escapeHtml(nin)}<span class="odds-nin-suffix">人気</span></td>
         <td class="odds-fuku">${escapeHtml(h.fukushou || "－")}</td>
       </tr>`;
     })
     .join("");
+  const umaSort = sortKey === "umaban" ? " is-sorted" : "";
+  const oddsSort = sortKey === "odds" ? " is-sorted" : "";
   panel.innerHTML = `
     <div class="odds-wrap">
       <div class="odds-head">
@@ -356,13 +375,40 @@ function renderOdds() {
         <span class="odds-meta">${fetched ? `${escapeHtml(fetched)} 時点` : ""}<button class="odds-refresh" type="button" id="oddsRefreshBtn" title="オッズ再取得">↻</button></span>
       </div>
       <table class="odds-table">
-        <thead><tr><th>馬番</th><th>馬名</th><th>単勝</th><th>人気</th><th>複勝</th></tr></thead>
+        <thead><tr>
+          <th class="odds-sortable${umaSort}" data-sort="umaban" role="button" tabindex="0" title="馬番順に並び替え">馬番${umaSort ? " ▲" : ""}</th>
+          <th class="odds-name">馬名 / 評価</th>
+          <th class="odds-sortable${oddsSort}" data-sort="odds" role="button" tabindex="0" title="単勝オッズ(人気)順に並び替え">単勝${oddsSort ? " ▲" : ""}</th>
+          <th>人気</th>
+          <th>複勝</th>
+        </tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <p class="odds-note">南関公式の暫定オッズ（発売中は変動）。↻またはレース再選択で更新。</p>
+      <p class="odds-note">南関公式の暫定オッズ（発売中は変動）。見出しの馬番/単勝で並び替え。↻またはレース再選択で更新。</p>
     </div>`;
   const btn = panel.querySelector("#oddsRefreshBtn");
   if (btn) btn.addEventListener("click", () => void loadOdds());
+  for (const th of panel.querySelectorAll(".odds-sortable")) {
+    const apply = () => { state.oddsSort = th.dataset.sort; renderOdds(); };
+    th.addEventListener("click", apply);
+    th.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); apply(); } });
+  }
+}
+
+// オッズ表示用: 馬番→総合評価tier のマップ（raceDetail.horses、無ければ grades を名前照合）。
+function oddsTierMap() {
+  const map = new Map();
+  const horses = state.raceDetail?.horses || [];
+  for (const h of horses) {
+    if (h.umaban != null && h.tier) map.set(Number(h.umaban), h.tier);
+  }
+  return map;
+}
+function tierClass(tier) {
+  if (["S", "A"].includes(tier)) return "sa";
+  if (tier === "B") return "b";
+  if (tier === "C") return "c";
+  return "low";
 }
 
 // 評価一覧を左カラムに常設表示。各馬番に予想印（◎○▲…）ボタンを付ける。

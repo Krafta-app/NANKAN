@@ -327,7 +327,8 @@ select {
   line-height: 1.4;
 }
 .odds-refresh:hover { background: var(--green-2); }
-.odds-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+/* グローバルの table{min-width:620px} を上書きし、スマホ幅に収める */
+.odds-table { width: 100%; min-width: 0; border-collapse: collapse; font-size: 14px; table-layout: fixed; }
 .odds-table th, .odds-table td {
   padding: 7px 8px;
   border-bottom: 1px solid var(--line);
@@ -335,13 +336,58 @@ select {
 }
 .odds-table th { color: var(--muted); font-weight: 700; font-size: 12px; }
 .odds-table th:nth-child(2), .odds-table .odds-name { text-align: left; }
+/* 列幅: 馬番 / 馬名+評価 / 単勝 / 人気 / 複勝 */
+.odds-table th:nth-child(1) { width: 44px; }
+.odds-table th:nth-child(3) { width: 68px; }
+.odds-table th:nth-child(4) { width: 52px; }
+.odds-table th:nth-child(5) { width: 82px; }
 .odds-uma { font-weight: 800; text-align: center; }
 .odds-tan { font-weight: 800; }
-.odds-nin { color: var(--muted); }
+.odds-nin { color: var(--muted); white-space: nowrap; }
+.odds-nin-suffix { font-size: 11px; margin-left: 1px; }
+.odds-name { min-width: 0; }
+.odds-name-txt {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.odds-tier {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  padding: 0 4px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 800;
+  vertical-align: middle;
+}
+.odds-tier.tier-sa { background: var(--green); color: #fff; }
+.odds-tier.tier-b { background: var(--gold-2); color: #70520d; }
+.odds-tier.tier-c { background: #f0ece2; color: var(--ink); }
+.odds-tier.tier-low { background: #f0ece2; color: var(--muted); }
+.odds-sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.odds-sortable:hover { color: var(--ink); text-decoration: underline; }
+.odds-sortable.is-sorted { color: var(--green); }
 .odds-table tr.odds-fav .odds-tan,
 .odds-table tr.odds-fav .odds-nin { color: var(--green); }
 .odds-table tr.odds-fav { background: var(--green-2); }
 .odds-note { color: var(--muted); font-size: 12px; margin: 2px 0 0; }
+@media (max-width: 620px) {
+  .odds-table { font-size: 13px; }
+  .odds-table th, .odds-table td { padding: 6px 4px; }
+  .odds-table th:nth-child(1) { width: 34px; }
+  .odds-table th:nth-child(3) { width: 56px; }
+  .odds-table th:nth-child(4) { width: 40px; }
+  .odds-table th:nth-child(5) { width: 66px; }
+  .odds-nin-suffix { display: none; }
+  .odds-tier { min-width: 16px; height: 16px; margin-left: 4px; }
+}
 
 .badge {
   display: inline-flex;
