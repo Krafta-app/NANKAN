@@ -88,6 +88,11 @@ h1 {
   margin: 4px 0 0;
   color: var(--muted);
   font-size: 13px;
+  line-height: 1.42;
+}
+
+#statusLine {
+  max-width: min(980px, calc(100vw - 180px));
 }
 
 .top-actions {
@@ -315,21 +320,51 @@ select {
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 7px;
 }
+.ara-banner.secure { border-color: rgba(31, 107, 75, 0.48); background: #d9eadf; }
 .ara-banner.hot { border-color: rgba(179, 58, 47, 0.4); background: #fae7e3; }
+.ara-banner.warn { border-color: rgba(184, 134, 31, 0.4); background: #fff3d3; }
+.ara-banner.danger { border-color: rgba(138, 58, 69, 0.44); background: #f5dde1; }
 .ara-banner.cool { border-color: rgba(31, 107, 75, 0.4); background: var(--green-2); }
 .ara-banner.flat { border-color: rgba(184, 134, 31, 0.35); background: var(--gold-2); }
 .ara-main { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.ara-emoji { font-size: 15px; }
 .ara-label { font-weight: 800; font-size: 15px; }
+.ara-metrics { display: flex; flex-wrap: wrap; gap: 6px; }
+.ara-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid rgba(32, 34, 31, 0.12);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.56);
+  font-size: 12px;
+  font-weight: 700;
+}
+.ara-pill b { font-size: 15px; }
 .ara-sub { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 12px; color: var(--muted); }
-.ara-prob { font-size: 13px; color: var(--ink); }
-.ara-prob b { font-size: 15px; }
 .ara-reason { flex: 1; min-width: 0; }
-.ara-caveat { font-size: 11px; color: var(--muted); line-height: 1.4; }
+.ara-result {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding-top: 7px;
+  border-top: 1px dashed rgba(32, 34, 31, 0.18);
+  font-size: 12px;
+  color: var(--muted);
+}
+.ara-result b { color: var(--ink); }
+.ara-result small {
+  flex-basis: 100%;
+  font-size: 11px;
+  color: var(--muted);
+}
 @media (max-width: 620px) {
   .ara-label { font-size: 14px; }
+  .ara-metrics { gap: 5px; }
+  .ara-pill { padding: 2px 6px; }
 }
 .odds-head {
   display: flex;
@@ -1207,6 +1242,10 @@ textarea {
   .topbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  #statusLine {
+    max-width: 100%;
   }
 
   .top-actions {
