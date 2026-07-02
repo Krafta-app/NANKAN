@@ -11,6 +11,8 @@ const state = {
   notedUmaIds: new Set(),
   stats: null,
   activeTab: "pace",
+  odds: null,
+  oddsLoading: false,
   demo: new URLSearchParams(location.search).has("demo"),
 };
 
@@ -20,6 +22,7 @@ const PIN_KEY = "nankan_site_pin";
 const PLACE_FALLBACK = { "10": "大井", "11": "川崎", "12": "船橋", "13": "浦和" };
 const TAB_PANELS = {
   pace: "panelPace",
+  odds: "panelOdds",
   index: "panelIndex",
   ai: "panelAi",
   match: "panelMatch",
@@ -37,7 +40,7 @@ function cacheElements() {
   for (const id of [
     "statusLine", "pinBox", "pinInput", "refreshButton",
     "dateSelect", "placeSelect", "raceRail", "raceSummary",
-    "panelPace", "panelIndex", "panelAi", "panelMatch", "panelMemo",
+    "panelPace", "panelOdds", "panelIndex", "panelAi", "panelMatch", "panelMemo",
   ]) {
     els[id] = document.getElementById(id);
   }
@@ -80,6 +83,7 @@ async function boot() {
 async function refreshAll() {
   await loadAllNotes();
   await loadRaces(true);
+  if (state.raceDetail?.race) void loadOdds();
 }
 
 async function loadConfig() {
@@ -165,11 +169,13 @@ async function loadRace(raceKey) {
   setStatus("レース詳細読込中");
   renderLoading(els.raceSummary, "予想を読み込み中");
 
+  state.odds = null;
   try {
     state.raceDetail = state.demo ? demoRace(raceKey) : await apiGet(`/api/race?race_key=${encodeURIComponent(raceKey)}`);
     state.parsed = parsePrediction(state.raceDetail);
     renderAllPanels();
-    renderRaceHeader();
+    setStatus(summaryLine());
+    void loadOdds();
   } catch (err) {
     state.raceDetail = null;
     state.parsed = null;
@@ -269,10 +275,94 @@ function renderRaceRail() {
 function renderAllPanels() {
   renderEval();
   renderSection(els.panelPace, state.parsed?.paceEl, "展開");
+  renderOdds();
   renderSection(els.panelIndex, state.parsed?.indexEl, "相対評価");
   renderAi();
   renderSection(els.panelMatch, state.parsed?.matchEl, "対戦表");
   renderMemo();
+}
+
+// 南関公式の単勝・複勝オッズをサーバー関数(/api/odds)経由で取得。人気は単勝昇順で導出。
+async function loadOdds() {
+  const race = state.raceDetail?.race;
+  const raceId = race?.race_id ? String(race.race_id) : "";
+  if (!/^\d{16}$/.test(raceId) || state.demo) {
+    state.odds = state.demo ? { horses: demoOdds() } : null;
+    renderOdds();
+    return;
+  }
+  state.oddsLoading = true;
+  renderOdds();
+  try {
+    const data = await apiGet(`/api/odds?race_id=${encodeURIComponent(raceId)}`);
+    state.odds = data;
+  } catch (err) {
+    state.odds = { error: err.message };
+  } finally {
+    state.oddsLoading = false;
+    renderOdds();
+  }
+}
+
+function demoOdds() {
+  return [
+    { umaban: 1, name: "サンプルスター", tanshou: 3.2, fukushou: "1.3-1.9", ninki: 2 },
+    { umaban: 2, name: "ミナミノライト", tanshou: 2.1, fukushou: "1.1-1.4", ninki: 1 },
+    { umaban: 3, name: "カワサキロード", tanshou: 8.4, fukushou: "2.1-3.6", ninki: 3 },
+    { umaban: 4, name: "ウラワノカゼ", tanshou: 21.0, fukushou: "3.9-6.8", ninki: 4 },
+  ];
+}
+
+function renderOdds() {
+  const panel = els.panelOdds;
+  if (!panel) return;
+  if (!state.raceDetail?.race) {
+    renderEmpty(panel, "オッズなし", "レースを選んでください。");
+    return;
+  }
+  if (state.oddsLoading) {
+    renderLoading(panel, "オッズを取得中");
+    return;
+  }
+  const data = state.odds;
+  if (!data || data.error) {
+    renderEmpty(panel, "オッズ取得不可", data?.error || "発売前、または取得に失敗しました。↻で再取得できます。");
+    return;
+  }
+  const horses = (data.horses || []).slice().sort((a, b) => a.umaban - b.umaban);
+  if (!horses.length) {
+    renderEmpty(panel, "オッズなし", "オッズ表を取得できませんでした。");
+    return;
+  }
+  const fetched = data.fetched_at ? shortDateTime(data.fetched_at) : "";
+  const rows = horses
+    .map((h) => {
+      const tan = h.tanshou != null ? `${h.tanshou.toFixed(1)}` : "－";
+      const nin = h.ninki ? `${h.ninki}番人気` : "－";
+      const hot = h.ninki && h.ninki <= 3 ? " odds-fav" : "";
+      return `<tr class="${hot.trim()}">
+        <td class="odds-uma">${escapeHtml(String(h.umaban))}</td>
+        <td class="odds-name">${escapeHtml(h.name || "")}</td>
+        <td class="odds-tan">${escapeHtml(tan)}</td>
+        <td class="odds-nin">${escapeHtml(nin)}</td>
+        <td class="odds-fuku">${escapeHtml(h.fukushou || "－")}</td>
+      </tr>`;
+    })
+    .join("");
+  panel.innerHTML = `
+    <div class="odds-wrap">
+      <div class="odds-head">
+        <strong>単勝・複勝オッズ</strong>
+        <span class="odds-meta">${fetched ? `${escapeHtml(fetched)} 時点` : ""}<button class="odds-refresh" type="button" id="oddsRefreshBtn" title="オッズ再取得">↻</button></span>
+      </div>
+      <table class="odds-table">
+        <thead><tr><th>馬番</th><th>馬名</th><th>単勝</th><th>人気</th><th>複勝</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p class="odds-note">南関公式の暫定オッズ（発売中は変動）。↻またはレース再選択で更新。</p>
+    </div>`;
+  const btn = panel.querySelector("#oddsRefreshBtn");
+  if (btn) btn.addEventListener("click", () => void loadOdds());
 }
 
 // 評価一覧を左カラムに常設表示。各馬番に予想印（◎○▲…）ボタンを付ける。
@@ -750,62 +840,6 @@ function summaryLine() {
     race.post_time ? `${race.post_time}発走` : "",
   ].filter(Boolean);
   return parts.join("  ");
-}
-
-// 荒れ度6カテゴリ（keiba_bot.compute_arare_index のJS移植・相対tierのみ／事前オッズ不使用）。
-const ARARE_ORDER = ["S", "A", "B", "C", "D", "E", "F"];
-function arareGv(g) {
-  const i = ARARE_ORDER.indexOf(g);
-  return i < 0 ? 99 : i;
-}
-function raceGrades(detail) {
-  const race = detail?.race ?? detail;
-  let g = race?.grades_json ?? race?.grades ?? null;
-  if (typeof g === "string") {
-    try { g = JSON.parse(g); } catch { g = null; }
-  }
-  if (g && typeof g === "object" && Object.keys(g).length) return g;
-  // grades_json 欠損時は出走馬の tier から復元。
-  const horses = detail?.horses ?? detail?.results ?? [];
-  const derived = {};
-  for (const h of horses) {
-    if (h && h.name && h.tier) derived[h.name] = h.tier;
-  }
-  return derived;
-}
-function computeArare(grades) {
-  const vals = Object.values(grades || {}).filter(Boolean);
-  const field = vals.length;
-  if (field < 3) return { emoji: "⚪", name: "判定不可", level: 0, reason: "頭数不足" };
-  const cnt = {};
-  for (const v of vals) cnt[v] = (cnt[v] || 0) + 1;
-  const nAplus = (cnt["S"] || 0) + (cnt["A"] || 0);
-  const bestV = Math.min(...vals.map(arareGv));
-  const bestG = ARARE_ORDER[bestV] ?? "?";
-  const uniqueAxis = vals.filter((v) => arareGv(v) === bestV).length === 1;
-  const restNtiers = new Set(vals.filter((v) => arareGv(v) !== bestV)).size;
-  if (uniqueAxis) {
-    if (restNtiers >= 5) return { emoji: "🟣", name: "紐荒れ(軸不動)", level: 1, reason: `軸(${bestG})1頭は堅いが相手が${restNtiers}種に拡散＝軸1頭ながし妙味` };
-    if (restNtiers <= 3) return { emoji: "🟢", name: "堅軸・本線", level: -1, reason: `軸(${bestG})1頭＋相手も${restNtiers}種に集約＝買い目を絞れる鉄板構造` };
-    return { emoji: "🔵", name: "軸中心", level: 0, reason: `軸(${bestG})1頭・相手${restNtiers}種でやや広い標準戦` };
-  }
-  if (nAplus === 2) return { emoji: "🔴", name: "二強波乱", level: 1, reason: "上位2頭に評価集中・軸不定＝どちらか飛ぶと大波乱" };
-  if (nAplus >= 5) return { emoji: "🟢", name: "上位拮抗・堅め", level: -1, reason: `上位tier${nAplus}頭と厚く実力上位が順当に収まりやすい` };
-  return { emoji: "🟡", name: "混戦・標準", level: 0, reason: "突出馬なくフラットな標準戦" };
-}
-function arareBadgeHtml(detail) {
-  const ar = computeArare(raceGrades(detail));
-  if (ar.name === "判定不可") return "";
-  const lvl = ar.level > 0 ? "hot" : ar.level < 0 ? "cool" : "flat";
-  return `<span class="arare-badge ${lvl}" title="${escapeHtml(ar.reason)}">${ar.emoji}${escapeHtml(ar.name)}</span>`;
-}
-function renderRaceHeader() {
-  const race = state.raceDetail?.race;
-  if (!race || !els.statusLine) {
-    setStatus(summaryLine());
-    return;
-  }
-  els.statusLine.innerHTML = `${escapeHtml(summaryLine())} ${arareBadgeHtml(state.raceDetail)}`;
 }
 
 function formatDate(value) {
