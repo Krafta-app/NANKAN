@@ -13,7 +13,7 @@ const state = {
   activeTab: "pace",
   odds: null,
   oddsLoading: false,
-  oddsSort: "umaban",
+  oddsSort: "odds",
   fullRaceLoadingKey: "",
   demo: new URLSearchParams(location.search).has("demo"),
 };
@@ -391,7 +391,7 @@ function renderOdds() {
     .map((h) => {
       const tan = h.tanshou != null ? `${h.tanshou.toFixed(1)}` : "－";
       const nin = h.ninki ? `${h.ninki}` : "－";
-      const hot = h.ninki && h.ninki <= 3 ? " odds-fav" : "";
+      const hot = h.tanshou != null && h.tanshou < 10 ? " odds-fav" : "";
       const tierChip = h.tier
         ? `<span class="odds-tier tier-${tierClass(h.tier)}">${escapeHtml(h.tier)}</span>`
         : "";
@@ -422,7 +422,7 @@ function renderOdds() {
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <p class="odds-note">南関公式の暫定オッズ（発売中は変動）。見出しの馬番/単勝で並び替え。↻またはレース再選択で更新。</p>
+      <p class="odds-note">南関公式の暫定オッズ（発売中は変動）。単勝10倍未満を強調。見出しの馬番/単勝で並び替え。↻またはレース再選択で更新。</p>
     </div>`;
   const btn = panel.querySelector("#oddsRefreshBtn");
   if (btn) btn.addEventListener("click", () => void loadOdds());
@@ -458,9 +458,8 @@ function oddsTierForHorse(horse) {
 }
 
 function tierClass(tier) {
-  if (["S", "A"].includes(tier)) return "sa";
-  if (tier === "B") return "b";
-  if (tier === "C") return "c";
+  const rank = String(tier || "").trim().slice(0, 1).toUpperCase();
+  if (["S", "A", "B", "C", "D", "E"].includes(rank)) return rank.toLowerCase();
   return "low";
 }
 

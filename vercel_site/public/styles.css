@@ -368,14 +368,36 @@ select {
   margin-left: 6px;
   padding: 0 4px;
   border-radius: 5px;
+  border: 1px solid currentColor;
   font-size: 11px;
   font-weight: 800;
   vertical-align: middle;
 }
-.odds-tier.tier-sa { background: var(--green); color: #fff; }
-.odds-tier.tier-b { background: var(--gold-2); color: #70520d; }
-.odds-tier.tier-c { background: #f0ece2; color: var(--ink); }
-.odds-tier.tier-low { background: #f0ece2; color: var(--muted); }
+.odds-tier.tier-s {
+  background: rgba(122, 46, 46, 0.1);
+  color: var(--s-color);
+}
+.odds-tier.tier-a {
+  background: rgba(255, 76, 140, 0.1);
+  color: var(--a-color);
+}
+.odds-tier.tier-b {
+  background: rgba(211, 47, 47, 0.1);
+  color: var(--b-color);
+}
+.odds-tier.tier-c {
+  background: rgba(245, 124, 0, 0.12);
+  color: var(--c-color);
+}
+.odds-tier.tier-d {
+  background: rgba(255, 179, 0, 0.16);
+  color: var(--d-color);
+}
+.odds-tier.tier-e,
+.odds-tier.tier-low {
+  background: #f0ece2;
+  color: var(--muted);
+}
 .odds-sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 .odds-sortable:hover { color: var(--ink); text-decoration: underline; }
 .odds-sortable.is-sorted { color: var(--green); }
