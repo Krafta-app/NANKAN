@@ -14,6 +14,7 @@ const state = {
   odds: null,
   oddsLoading: false,
   oddsSort: "umaban",
+  fullRaceLoadingKey: "",
   demo: new URLSearchParams(location.search).has("demo"),
 };
 
@@ -133,14 +134,11 @@ async function loadRaces(preserveRace = false) {
 
     state.dates = data.dates || [];
     if (state.currentDate && state.dates.length && !state.dates.includes(state.currentDate)) {
-      state.currentDate = data.latestDate || state.dates[0] || "";
+      state.currentDate = data.selectedDate || data.latestDate || state.dates[0] || "";
       state.currentRaceKey = "";
       return loadRaces(false);
     }
-    if (!state.currentDate && data.latestDate) {
-      state.currentDate = data.latestDate;
-      return loadRaces(preserveRace);
-    }
+    if (!state.currentDate && (data.selectedDate || data.latestDate)) state.currentDate = data.selectedDate || data.latestDate;
 
     state.races = data.races || [];
     state.places = data.places || [];
@@ -171,12 +169,14 @@ async function loadRace(raceKey) {
   renderLoading(els.raceSummary, "予想を読み込み中");
 
   state.odds = null;
+  state.fullRaceLoadingKey = "";
   try {
-    state.raceDetail = state.demo ? demoRace(raceKey) : await apiGet(`/api/race?race_key=${encodeURIComponent(raceKey)}`);
+    state.raceDetail = state.demo ? demoRace(raceKey) : await apiGet(`/api/race?race_key=${encodeURIComponent(raceKey)}&include_page=0`);
     state.parsed = parsePrediction(state.raceDetail);
     renderAllPanels();
     setStatus(summaryLine());
     void loadOdds();
+    void ensureFullRaceForActiveTab();
   } catch (err) {
     state.raceDetail = null;
     state.parsed = null;
@@ -184,6 +184,43 @@ async function loadRace(raceKey) {
     setStatus("読込エラー");
     renderEmpty(els.raceSummary, "レース詳細を取得できません", err.message);
   }
+}
+
+async function ensureFullRaceForActiveTab() {
+  if (!["pace", "index", "ai", "match"].includes(state.activeTab)) return;
+  await ensureFullRace();
+}
+
+async function ensureFullRace() {
+  const raceKey = state.currentRaceKey;
+  if (!raceKey || state.demo || state.raceDetail?.pageLoaded || state.fullRaceLoadingKey === raceKey) return;
+  state.fullRaceLoadingKey = raceKey;
+  renderHeavyPanelsLoading();
+  try {
+    const fullDetail = await apiGet(`/api/race?race_key=${encodeURIComponent(raceKey)}`);
+    if (state.currentRaceKey !== raceKey) return;
+    state.raceDetail = fullDetail;
+    state.parsed = parsePrediction(state.raceDetail);
+    renderAllPanels();
+    setStatus(summaryLine());
+  } catch (err) {
+    renderHeavyPanelsError(err.message);
+  } finally {
+    if (state.fullRaceLoadingKey === raceKey) state.fullRaceLoadingKey = "";
+  }
+}
+
+function renderHeavyPanelsLoading() {
+  for (const [tab, id] of Object.entries(TAB_PANELS)) {
+    if (["pace", "index", "ai", "match"].includes(tab)) renderLoading(els[id], "詳細を読み込み中");
+  }
+}
+
+function renderHeavyPanelsError(message) {
+  renderEmpty(els.panelPace, "展開を取得できません", message);
+  renderEmpty(els.panelIndex, "相対評価を取得できません", message);
+  renderEmpty(els.panelAi, "出走馬分析を取得できません", message);
+  renderEmpty(els.panelMatch, "対戦表を取得できません", message);
 }
 
 // ---- data_html から各セクションを取り出し、馬番↔uma_id↔メモ の対応表を作る ----
@@ -485,6 +522,10 @@ function renderSection(panel, sourceEl, label) {
     renderEmpty(panel, `${label}なし`, "レースを選んでください。");
     return;
   }
+  if (!state.raceDetail.pageLoaded) {
+    renderEmpty(panel, `${label}読込待ち`, "評価一覧を先に表示しています。詳細はこのまま読み込みます。");
+    return;
+  }
   if (!sourceEl) {
     renderEmpty(panel, `${label}なし`, "このレースには該当データがありません。");
     return;
@@ -504,6 +545,10 @@ function renderAi() {
   const parsed = state.parsed;
   if (!state.raceDetail?.race) {
     renderEmpty(panel, "出走馬分析なし", "レースを選んでください。");
+    return;
+  }
+  if (!state.raceDetail.pageLoaded) {
+    renderEmpty(panel, "出走馬分析読込待ち", "評価一覧を先に表示しています。詳細はこのまま読み込みます。");
     return;
   }
   if (!parsed?.aiEl) {
@@ -837,6 +882,7 @@ function showTab(tab) {
   });
   document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.remove("active"));
   document.getElementById(TAB_PANELS[tab])?.classList.add("active");
+  void ensureFullRaceForActiveTab();
 }
 
 function renderPinState() {
@@ -1004,6 +1050,7 @@ function demoRace(raceKey) {
   return {
     ok: true, race,
     page: { data_html: demoHtml(race), data_text: "" },
+    pageLoaded: true,
     horses, results: horses,
     notes: { "demo-1": { note_text: "内枠で揉まれなければ安定。前走は不利あり。" } },
     patterns: { "demo-1": { 内枠: "◯", 番手: "△" } },

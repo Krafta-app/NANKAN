@@ -17,6 +17,7 @@ module.exports = async function handler(req, res) {
 
   const raceKey = String(req.query.race_key || "");
   if (!raceKey) return sendError(res, 400, "race_key が必要です");
+  const includePage = req.query.include_page !== "0";
 
   try {
     const raceRows = await supabaseFetch("races", {
@@ -30,13 +31,15 @@ module.exports = async function handler(req, res) {
 
     const race = compactRace(raceRows[0]);
     const [pageRows, resultRows] = await Promise.all([
-      supabaseFetch("race_pages", {
-        query: {
-          select: "data_html,data_text",
-          race_key: `eq.${raceKey}`,
-          limit: "1",
-        },
-      }).catch(() => []),
+      includePage
+        ? supabaseFetch("race_pages", {
+            query: {
+              select: "data_html,data_text",
+              race_key: `eq.${raceKey}`,
+              limit: "1",
+            },
+          }).catch(() => [])
+        : Promise.resolve([]),
       supabaseFetch("race_results", {
         query: {
           select: "*",
@@ -78,6 +81,7 @@ module.exports = async function handler(req, res) {
         data_html: pageRows?.[0]?.data_html || "",
         data_text: pageRows?.[0]?.data_text || "",
       },
+      pageLoaded: includePage,
       horses,
       results,
       notes,
