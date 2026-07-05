@@ -391,6 +391,8 @@ function renderGroupedBoard(races) {
     const list = [...byPlace.get(place)].sort((a, b) => numVal(a.race_num) - numVal(b.race_num));
     return buildTrackColumn(place, list);
   });
+  // その日1場だけなら列を横幅いっぱいに広げる（2列想定の幅制限を外す）。
+  els.raceRail.classList.toggle("is-single", order.length === 1);
   els.raceRail.replaceChildren(...cols);
 }
 

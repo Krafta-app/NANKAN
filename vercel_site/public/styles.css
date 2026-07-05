@@ -1698,6 +1698,12 @@ textarea {
   max-width: min(420px, 94vw);
 }
 
+/* その日1場だけのときは列を横幅いっぱいに。 */
+.race-board.is-single .track-col {
+  flex-basis: 100%;
+  max-width: 100%;
+}
+
 .track-col-head {
   padding: 8px 11px;
   background: var(--green);
