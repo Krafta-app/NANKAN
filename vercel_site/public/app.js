@@ -15,11 +15,16 @@ const state = {
   oddsLoading: false,
   oddsSort: "odds",
   fullRaceLoadingKey: "",
+  view: "list",                 // "list"（レース一覧）| "race"（予想）
+  sortMode: readStoredSortMode(), // "race"（レース順）| "conf"（信用度が高い順）
+  nerai: {},                    // race_key -> { isTarget, count, ... }
+  neraiReq: "",                 // 直近に投げた狙い判定リクエストの識別子（stale判定用）
   demo: new URLSearchParams(location.search).has("demo"),
 };
 
 const els = {};
 const PIN_KEY = "nankan_site_pin";
+const SORT_KEY = "nankan_race_sort";
 
 const PLACE_FALLBACK = { "10": "大井", "11": "川崎", "12": "船橋", "13": "浦和" };
 const TAB_PANELS = {
@@ -42,6 +47,7 @@ function cacheElements() {
   for (const id of [
     "statusLine", "pinBox", "pinInput", "refreshButton",
     "dateSelect", "placeSelect", "raceRail", "raceSummary",
+    "listView", "raceView", "backToList", "raceViewTitle", "sortByRace", "sortByConf",
     "panelPace", "panelOdds", "panelIndex", "panelAi", "panelMatch", "panelMemo",
   ]) {
     els[id] = document.getElementById(id);
@@ -50,14 +56,17 @@ function cacheElements() {
 
 function bindEvents() {
   els.refreshButton.addEventListener("click", () => void refreshAll());
+  // 開催日/開催を変えたら一覧に留める（特定のレースは自動で開かない）。
   els.dateSelect.addEventListener("change", () => {
     state.currentDate = els.dateSelect.value;
     state.currentRaceKey = "";
+    showListView();
     void loadRaces();
   });
   els.placeSelect.addEventListener("change", () => {
     state.currentPlace = els.placeSelect.value;
     state.currentRaceKey = "";
+    showListView();
     void loadRaces();
   });
   els.pinInput.value = localStorage.getItem(PIN_KEY) || "";
@@ -68,6 +77,66 @@ function bindEvents() {
   document.querySelectorAll("#raceTabs .tab").forEach((button) => {
     button.addEventListener("click", () => showTab(button.dataset.tab));
   });
+
+  els.sortByRace?.addEventListener("click", () => setSortMode("race"));
+  els.sortByConf?.addEventListener("click", () => setSortMode("conf"));
+  els.backToList?.addEventListener("click", () => backToList());
+  renderSortToggle();
+}
+
+/* ------------------------------- views ------------------------------- */
+function showListView() {
+  state.view = "list";
+  if (els.listView) els.listView.hidden = false;
+  if (els.raceView) els.raceView.hidden = true;
+}
+
+function showRaceView() {
+  state.view = "race";
+  if (els.listView) els.listView.hidden = true;
+  if (els.raceView) els.raceView.hidden = false;
+  window.scrollTo(0, 0);
+}
+
+// 予想ビューから一覧へ戻る。時刻連動の枠囲い・メモ印を更新し、直近の発走前レースへスクロール。
+function backToList() {
+  state.currentRaceKey = "";
+  showListView();
+  renderRaceBoard();
+  setStatus(listStatusText());
+  requestAnimationFrame(scrollBoardToUpcoming);
+}
+
+function setSortMode(mode) {
+  const next = mode === "conf" ? "conf" : "race";
+  if (state.sortMode === next) return;
+  state.sortMode = next;
+  writeStoredSortMode(next);
+  renderSortToggle();
+  renderRaceBoard();
+}
+
+function renderSortToggle() {
+  const conf = state.sortMode === "conf";
+  els.sortByRace?.classList.toggle("active", !conf);
+  els.sortByConf?.classList.toggle("active", conf);
+  els.sortByRace?.setAttribute("aria-pressed", String(!conf));
+  els.sortByConf?.setAttribute("aria-pressed", String(conf));
+}
+
+function readStoredSortMode() {
+  try { return localStorage.getItem(SORT_KEY) === "conf" ? "conf" : "race"; } catch { return "race"; }
+}
+
+function writeStoredSortMode(value) {
+  try { localStorage.setItem(SORT_KEY, value === "conf" ? "conf" : "race"); } catch { /* private mode */ }
+}
+
+function listStatusText() {
+  const places = new Set(state.races.map((r) => r.place_name || "")).size;
+  const races = state.races.length;
+  if (!races) return "対象レースなし";
+  return `${places}場 ${races}R ／ レースを選ぶ`;
 }
 
 async function boot() {
@@ -143,18 +212,22 @@ async function loadRaces(preserveRace = false) {
     state.races = data.races || [];
     state.places = data.places || [];
     renderFilters();
-    renderRaceRail();
+    renderRaceBoard();
+    void loadNerai();
 
-    if (!preserveRace || !state.races.some((race) => race.race_key === state.currentRaceKey)) {
-      state.currentRaceKey = state.races[0]?.race_key || "";
-    }
-    if (state.currentRaceKey) {
+    // 更新(refresh)時に予想ビューを見ていて、そのレースが残っていれば継続表示する。
+    // それ以外（初回・開催変更）は一覧に留め、特定のレースは自動で開かない。
+    const keepRace = preserveRace && state.currentRaceKey
+      && state.races.some((race) => race.race_key === state.currentRaceKey);
+    if (keepRace) {
       await loadRace(state.currentRaceKey);
     } else {
+      state.currentRaceKey = "";
       state.raceDetail = null;
       state.parsed = null;
-      renderAllPanels();
-      setStatus("対象レースなし");
+      showListView();
+      setStatus(listStatusText());
+      requestAnimationFrame(scrollBoardToUpcoming);
     }
   } catch (err) {
     setStatus("読込エラー");
@@ -164,7 +237,12 @@ async function loadRaces(preserveRace = false) {
 
 async function loadRace(raceKey) {
   state.currentRaceKey = raceKey;
-  renderRaceRail();
+  const listed = state.races.find((race) => race.race_key === raceKey);
+  if (els.raceViewTitle && listed) {
+    els.raceViewTitle.textContent = `${listed.place_name || ""}${listed.race_num ?? ""}R ${raceDisplayName(listed)}`.trim();
+  }
+  showRaceView();
+  renderRaceBoard();
   setStatus("レース詳細読込中");
   renderLoading(els.raceSummary, "予想を読み込み中");
 
@@ -284,30 +362,297 @@ function raceHasMemo(race) {
   return ids.some((id) => state.notedUmaIds.has(String(id)));
 }
 
-function renderRaceRail() {
+// レース一覧ボード。レース順＝競馬場ごとの列（横並び・横スクロール）、
+// 信用度順＝全レースを信用度が高い順に並べた1列。
+function renderRaceBoard() {
   if (!state.races.length) {
+    els.raceRail.className = "race-board";
     renderEmpty(els.raceRail, "該当レースなし", "Macで予想生成後、Supabaseへ同期されると表示されます。");
     return;
   }
-  els.raceRail.replaceChildren(
-    ...state.races.map((race) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      const active = race.race_key === state.currentRaceKey;
-      const memo = raceHasMemo(race);
-      button.className = `race-button${active ? " active" : ""}${memo ? " has-memo" : ""}`;
-      // 競馬場の頭文字＋距離（例: 大井1200m → 大1200）。「予想」文字は出さず横長・縦スリムに。
-      const placeInitial = (race.place_name || "").slice(0, 1);
-      const label = `${placeInitial}${race.dist || ""}`;
-      button.innerHTML = `
-        <strong>${escapeHtml(race.race_num)}R${memo ? '<i class="memo-dot" title="メモ有り"></i>' : ""}</strong>
-        <span class="rb-meta">${escapeHtml(label || "—")}</span>
-        ${race.has_result ? '<span class="rb-state done">結果</span>' : ""}
-      `;
-      button.addEventListener("click", () => void loadRace(race.race_key));
-      return button;
-    }),
-  );
+  els.raceRail.className = `race-board ${state.sortMode === "conf" ? "is-flat" : "is-grouped"}`;
+  if (state.sortMode === "conf") renderFlatBoard(state.races);
+  else renderGroupedBoard(state.races);
+}
+
+// 競馬場ごとに1列。列内は R 昇順。
+function renderGroupedBoard(races) {
+  const order = [];
+  const byPlace = new Map();
+  for (const race of races) {
+    const place = race.place_name || "—";
+    if (!byPlace.has(place)) {
+      byPlace.set(place, []);
+      order.push(place);
+    }
+    byPlace.get(place).push(race);
+  }
+  const cols = order.map((place) => {
+    const list = [...byPlace.get(place)].sort((a, b) => numVal(a.race_num) - numVal(b.race_num));
+    return buildTrackColumn(place, list);
+  });
+  els.raceRail.replaceChildren(...cols);
+}
+
+// 信用度が高い順の1列。同点は競馬場名→R番号で安定させる。各行に競馬場も表示する。
+function renderFlatBoard(races) {
+  const list = [...races].sort((a, b) => {
+    const d = confTierNum(b) - confTierNum(a);
+    if (d) return d;
+    const p = String(a.place_name || "").localeCompare(String(b.place_name || ""), "ja");
+    if (p) return p;
+    return numVal(a.race_num) - numVal(b.race_num);
+  });
+  const col = document.createElement("div");
+  col.className = "track-col is-flatcol";
+  const head = document.createElement("div");
+  head.className = "track-col-head";
+  head.innerHTML = `<div class="tch-place">信用度が高い順<span class="tch-kaisai">${list.length}R</span></div>`;
+  col.appendChild(head);
+  const body = document.createElement("div");
+  body.className = "track-col-body";
+  for (const race of list) body.appendChild(buildRaceRow(race, { showPlace: true }));
+  col.appendChild(body);
+  els.raceRail.replaceChildren(col);
+}
+
+function buildTrackColumn(place, races) {
+  const col = document.createElement("div");
+  col.className = "track-col";
+  col.dataset.place = place;
+  const head = document.createElement("div");
+  head.className = "track-col-head";
+  head.innerHTML = `<div class="tch-place">${escapeHtml(place)}<span class="tch-kaisai">${races.length}R</span></div>`;
+  col.appendChild(head);
+  const body = document.createElement("div");
+  body.className = "track-col-body";
+  for (const race of races) body.appendChild(buildRaceRow(race, { showPlace: false }));
+  col.appendChild(body);
+  return col;
+}
+
+// 1レース分の行（netkeiba一覧風）。クリックで予想ビューへ。
+function buildRaceRow(race, { showPlace }) {
+  const meta = parseRaceMeta(race);
+  const active = race.race_key === state.currentRaceKey;
+  const memo = raceHasMemo(race);
+  const upcoming = isUpcomingRace(race);
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = [
+    "rl-row",
+    meta.isSpecial ? "is-special" : "",
+    upcoming ? "is-upcoming" : "",
+    active ? "active" : "",
+    memo ? "has-memo" : "",
+  ].filter(Boolean).join(" ");
+
+  const numLabel = showPlace
+    ? `${escapeHtml(String(race.place_name || "").slice(0, 1))}${escapeHtml(String(race.race_num ?? "?"))}`
+    : `${escapeHtml(String(race.race_num ?? "?"))}R`;
+
+  // クラスは名前欄に入っているので重複を避け、グレード(重賞/OP/L)のときだけバッジを出す。
+  const gradeBadge = (meta.grade && meta.isSpecial)
+    ? `<span class="rl-grade grade-${meta.gradeCls}">${escapeHtml(meta.grade)}</span>`
+    : "";
+
+  const conf = raceConfidence(race);
+  const confBadge = conf
+    ? `<span class="rb-conf ${conf.cls}" title="信用度${conf.tier}（S/Aを軸として見る信用度）">信${escapeHtml(conf.tier)}</span>`
+    : "";
+  const info = state.nerai[race.race_key];
+  const neraiBadge = info?.isTarget
+    ? `<span class="rb-nerai" title="同競馬場での対戦やS/A同士の直接対決に該当する馬が${info.count}頭 → 狙いやすいレース">狙</span>`
+    : "";
+
+  const distTxt = `${meta.surface}${meta.dist || ""}${meta.dist ? "m" : ""}`;
+  const headTxt = meta.headCount ? `${meta.headCount}頭` : "";
+  const resultTxt = race.has_result ? '<span class="rl-done">結果</span>' : "";
+
+  button.innerHTML = `
+    <span class="rl-num">${numLabel}${memo ? '<i class="memo-dot" title="メモ有り"></i>' : ""}</span>
+    <span class="rl-main">
+      <span class="rl-line1">
+        <span class="rl-name">${escapeHtml(meta.name || raceDisplayName(race))}</span>
+        ${gradeBadge}
+      </span>
+      <span class="rl-line2">
+        ${race.post_time ? `<span class="rl-time">${escapeHtml(race.post_time)}</span>` : ""}
+        <span class="rl-dist">${escapeHtml(distTxt)}</span>
+        ${headTxt ? `<span class="rl-head">${escapeHtml(headTxt)}</span>` : ""}
+        ${resultTxt}
+        <span class="rl-flex"></span>
+        ${confBadge}${neraiBadge}
+      </span>
+    </span>
+  `;
+  button.addEventListener("click", () => void loadRace(race.race_key));
+  return button;
+}
+
+// いちばん近い「これから」のレースの列が見えるよう横スクロールする。
+function scrollBoardToUpcoming() {
+  const board = els.raceRail;
+  if (!board || state.view !== "list") return;
+  const row = board.querySelector(".rl-row.is-upcoming");
+  if (!row) { board.scrollLeft = 0; return; }
+  const col = row.closest(".track-col");
+  if (col) board.scrollLeft = Math.max(0, col.offsetLeft - 8);
+}
+
+// 一覧の表示に要る項目を race から取り出す。
+function parseRaceMeta(race) {
+  const name = String(race.race_name || "").trim();
+  const course = String(race.course || "");
+  const surface = /芝/.test(course) ? "芝" : "ダ";
+  const dist = race.dist || (course.match(/\d{3,4}/) || [""])[0];
+  const grade = parseRaceGrade(name);
+  // 名前が付いた特別・重賞は背景色で強調。単なるクラス条件（Ｃ３(一)等）は平場扱い。
+  const isSpecial = !!grade
+    || /特別|賞|杯|カップ|記念|ステークス|ダービー|オークス|マイル|オープン|Jpn|Ｇ[ⅠⅡⅢ]/.test(name);
+  const headCount = Object.keys(race.uma_ids || {}).length;
+  return { name, surface, dist, grade, gradeCls: grade ? "g" : "", isSpecial, headCount };
+}
+
+function parseRaceGrade(name) {
+  const norm = (s) => s.replace(/Ⅰ/g, "I").replace(/Ⅱ/g, "II").replace(/Ⅲ/g, "III");
+  const s = norm(String(name || ""));
+  let m = s.match(/Jpn\s?(III|II|I|[123])/);
+  if (m) return `Jpn${m[1].replace("3", "III").replace("2", "II").replace("1", "I")}`;
+  m = s.match(/(?:G|Ｇ)\s?(III|II|I|[123])/);
+  if (m) return `G${m[1].replace("3", "III").replace("2", "II").replace("1", "I")}`;
+  if (/リステッド|[(（]Ｌ[)）]|[(（]L[)）]/.test(s)) return "L";
+  if (/オープン|[(（](?:OP|Ｏ?Ｐ)[)）]/.test(s)) return "OP";
+  return "";
+}
+
+// 予想ビューの見出し等に使うレース名（無ければ距離条件で代替）。
+function raceDisplayName(race) {
+  const m = parseRaceMeta(race);
+  if (m.name) return m.name;
+  return `${m.surface}${m.dist || ""}${m.dist ? "m" : ""}`.trim() || "レース";
+}
+
+// スマホを開いた日本時間より後（＝これから発走）のレースか。
+// 開催日が未来なら全て、過去なら無し、当日は発走時刻で判定する。
+function isUpcomingRace(race) {
+  const runDate = String(state.currentDate || "");
+  const today = jstToday8();
+  const pm = postMinutes(race.post_time);
+  if (!runDate) return pm !== null && pm >= nowJstMinutes();
+  if (runDate > today) return true;
+  if (runDate < today) return false;
+  return pm !== null && pm >= nowJstMinutes();
+}
+
+function postMinutes(text) {
+  const m = String(text || "").match(/(\d{1,2})[:：](\d{2})/);
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+// 日本時間の今日を "YYYYMMDD" で返す（閲覧端末のTZに依存しない）。
+function jstToday8() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(new Date()).replace(/-/g, "");
+}
+
+function nowJstMinutes() {
+  const parts = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(new Date());
+  const h = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const mi = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  return h * 60 + mi;
+}
+
+function numVal(value) {
+  const n = parseInt(String(value ?? ""), 10);
+  return Number.isFinite(n) ? n : 999;
+}
+
+/* --------------------------- 信用度・狙い判定 --------------------------- */
+// 信用度は同一レースで何度も参照するので race にキャッシュする。
+function raceConfidence(race) {
+  if (!race) return null;
+  if (!("__conf" in race)) race.__conf = computeConfidenceTier(race);
+  return race.__conf;
+}
+
+function confTierNum(race) {
+  const conf = raceConfidence(race);
+  const n = conf ? Number(conf.tier) : 0;
+  return Number.isFinite(n) ? n : 0;
+}
+
+// 評価ランク分布から信用度(1〜5)を作る。S/A(軸)が絞れているほど高く、
+// 上位乱立・軸不在・低評価だらけは減点。中央競馬側と同じ「S/Aを軸として見る信用度」。
+function computeConfidenceTier(race) {
+  const counts = tierCounts(race);
+  const field = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (!field) return null;
+  const S = counts.S || 0;
+  const A = counts.A || 0;
+  const B = counts.B || 0;
+  const high = S + A;
+  const lowTail = (counts.D || 0) + (counts.E || 0) + (counts.F || 0) + (counts.G || 0);
+
+  let pts = 0;
+  if (S === 1) pts += 2;                 // 単独S＝明確な軸
+  else if (S === 0 && high === 1) pts += 1; // Sなしでも上位1頭に絞れる
+  else if (S >= 3) pts -= 1;             // S乱立＝軸が絞れない
+  if (high <= 2) pts += 1;               // 上位が絞れている
+  else if (high >= 5) pts -= 1;          // 上位過多＝混戦
+  if (high === 0) pts -= 1;              // 軸不在
+  const core = high + B;
+  if (core >= 4 && core <= Math.ceil(field * 0.65)) pts += 1; // 上位〜中位が程よい厚み
+  if (lowTail >= Math.ceil(field * 0.5)) pts -= 1;            // 低評価だらけ＝紛れ
+
+  const level = pts >= 3 ? 5 : pts >= 2 ? 4 : pts >= 0 ? 3 : pts >= -1 ? 2 : 1;
+  return { tier: String(level), cls: `conf-${level}` };
+}
+
+// grades(馬名→tier) から S/A/B… の頭数を数える。無ければ eval_list_text から拾う。
+function tierCounts(race) {
+  const counts = {};
+  const grades = race?.grades || {};
+  const vals = Object.values(grades);
+  if (vals.length) {
+    for (const t of vals) {
+      const r = String(t || "").trim().charAt(0).toUpperCase();
+      if (/[SABCDEFG]/.test(r)) counts[r] = (counts[r] || 0) + 1;
+    }
+    if (Object.keys(counts).length) return counts;
+  }
+  const text = String(race?.eval_list_text || "");
+  const re = /([SABCDEFG])((?:\s*\[\d{1,2}\])+)/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const n = (m[2].match(/\[\d{1,2}\]/g) || []).length;
+    counts[m[1]] = (counts[m[1]] || 0) + n;
+  }
+  return counts;
+}
+
+// 「狙」判定を /api/nerai から取得し、一覧のバッジへ反映する。
+async function loadNerai() {
+  const date = state.currentDate;
+  const place = state.currentPlace;
+  const reqId = `${date}|${place}`;
+  state.neraiReq = reqId;
+  if (!date || state.demo) { state.nerai = {}; return; }
+  try {
+    const params = new URLSearchParams({ date });
+    if (place) params.set("place_code", place);
+    const data = await apiGet(`/api/nerai?${params.toString()}`);
+    if (state.neraiReq !== reqId) return; // 開催が切り替わっていたら破棄
+    state.nerai = data.nerai || {};
+    if (state.view === "list") renderRaceBoard();
+  } catch {
+    if (state.neraiReq === reqId) state.nerai = {};
+  }
 }
 
 function renderAllPanels() {
@@ -823,7 +1168,7 @@ async function saveMemo(horse, textarea, card, saveButton) {
     state.parsed = parsePrediction(state.raceDetail);
     renderEval();
     renderAi();
-    renderRaceRail();
+    renderRaceBoard();
 
     saveButton.classList.add("saved");
     saveButton.textContent = "保存済";

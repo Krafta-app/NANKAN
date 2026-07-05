@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#f7f3ea" />
     <title>南関競馬AI</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=20260703c" />
+    <link rel="stylesheet" href="/styles.css?v=20260705a" />
   </head>
   <body>
     <div class="shell">
@@ -39,27 +39,44 @@
           </label>
         </section>
 
-        <section class="race-rail" id="raceRail" aria-label="レース一覧"></section>
+        <!-- トップ画面：レース一覧（競馬場ごとに横並び・横スクロール） -->
+        <section class="list-view" id="listView">
+          <div class="rail-head">
+            <span class="rail-head-title">レース一覧</span>
+            <div class="rail-sort" role="group" aria-label="並び替え">
+              <button class="rail-sort-btn active" id="sortByRace" type="button" aria-pressed="true">レース順</button>
+              <button class="rail-sort-btn" id="sortByConf" type="button" aria-pressed="false">信用度順</button>
+            </div>
+          </div>
+          <section class="race-board" id="raceRail" aria-label="レース一覧"></section>
+        </section>
 
-        <section class="workspace">
-          <aside class="eval-aside" id="raceSummary" aria-label="評価一覧"></aside>
+        <!-- レースを選ぶと表示される予想ビュー -->
+        <section class="race-view" id="raceView" hidden>
+          <div class="race-view-head">
+            <button class="back-btn" id="backToList" type="button">← 一覧へ</button>
+            <span class="race-view-title" id="raceViewTitle"></span>
+          </div>
+          <section class="workspace">
+            <aside class="eval-aside" id="raceSummary" aria-label="評価一覧"></aside>
 
-          <section class="main-panel">
-            <nav class="tabs" id="raceTabs" aria-label="表示切替">
-              <button class="tab active" data-tab="pace" type="button">展開</button>
-              <button class="tab" data-tab="odds" type="button">オッズ</button>
-              <button class="tab" data-tab="index" type="button">相対評価</button>
-              <button class="tab" data-tab="ai" type="button">出走馬分析</button>
-              <button class="tab" data-tab="match" type="button">対戦表</button>
-              <button class="tab" data-tab="memo" type="button">メモ</button>
-            </nav>
+            <section class="main-panel">
+              <nav class="tabs" id="raceTabs" aria-label="表示切替">
+                <button class="tab active" data-tab="pace" type="button">展開</button>
+                <button class="tab" data-tab="odds" type="button">オッズ</button>
+                <button class="tab" data-tab="index" type="button">相対評価</button>
+                <button class="tab" data-tab="ai" type="button">出走馬分析</button>
+                <button class="tab" data-tab="match" type="button">対戦表</button>
+                <button class="tab" data-tab="memo" type="button">メモ</button>
+              </nav>
 
-            <div class="tab-panel active" id="panelPace"></div>
-            <div class="tab-panel" id="panelOdds"></div>
-            <div class="tab-panel" id="panelIndex"></div>
-            <div class="tab-panel" id="panelAi"></div>
-            <div class="tab-panel" id="panelMatch"></div>
-            <div class="tab-panel" id="panelMemo"></div>
+              <div class="tab-panel active" id="panelPace"></div>
+              <div class="tab-panel" id="panelOdds"></div>
+              <div class="tab-panel" id="panelIndex"></div>
+              <div class="tab-panel" id="panelAi"></div>
+              <div class="tab-panel" id="panelMatch"></div>
+              <div class="tab-panel" id="panelMemo"></div>
+            </section>
           </section>
         </section>
       </main>
@@ -72,6 +89,6 @@
       </div>
     </template>
 
-    <script src="/app.js?v=20260703c" defer></script>
+    <script src="/app.js?v=20260705a" defer></script>
   </body>
 </html>

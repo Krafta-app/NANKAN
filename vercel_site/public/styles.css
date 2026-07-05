@@ -1594,3 +1594,311 @@ textarea {
 .app-mark-menu .mm-item:hover {
   background: var(--paper-2);
 }
+
+/* ==================== レース一覧トップ（2画面化） ==================== */
+.list-view[hidden],
+.race-view[hidden] {
+  display: none;
+}
+
+.rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 0 0;
+}
+
+.rail-head-title {
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.rail-sort {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  overflow: hidden;
+}
+
+.rail-sort-btn {
+  padding: 6px 14px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.rail-sort-btn.active {
+  background: var(--green);
+  color: #fff;
+}
+
+/* 信用度バッジ */
+.rb-conf {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1.5px solid var(--line);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+.rb-conf.conf-5 { background: #e5f5ec; color: #0f6b3f; border-color: #4caf7d; }
+.rb-conf.conf-4 { background: #e8f1fb; color: #12518e; border-color: #82acd8; }
+.rb-conf.conf-3 { background: #fbf1cf; color: #8a6d00; border-color: #d8b24a; }
+.rb-conf.conf-2 { background: #fff0dd; color: #9a4b00; border-color: #dda04c; }
+.rb-conf.conf-1 { background: #fbe6e3; color: #a4302a; border-color: #e0a19b; }
+
+/* 「狙」マーク */
+.rb-nerai {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: var(--gold);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 900;
+  box-shadow: 0 1px 3px rgba(184, 134, 31, 0.4);
+}
+
+/* レース一覧ボード（netkeiba風・競馬場ごとに横並び） */
+.race-board {
+  display: flex;
+  gap: 12px;
+  padding: 12px 0 6px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+  scroll-snap-type: x proximity;
+}
+
+.track-col {
+  flex: 0 0 320px;
+  max-width: 320px;
+  scroll-snap-align: start;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.track-col.is-flatcol {
+  flex-basis: min(420px, 94vw);
+  max-width: min(420px, 94vw);
+}
+
+.track-col-head {
+  padding: 8px 11px;
+  background: var(--green);
+  color: #fff;
+}
+
+.tch-place {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.tch-kaisai {
+  font-size: 11px;
+  font-weight: 700;
+  opacity: 0.85;
+}
+
+.track-col-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.rl-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.rl-row:first-child { border-top: 0; }
+.rl-row:hover { background: var(--paper-2); }
+.rl-row.is-special { background: #fdf7e3; }
+.rl-row.is-special:hover { background: #fbf0cf; }
+
+/* 端末を開いた時刻より後（これから発走）のレースは緑枠で囲う。 */
+.rl-row.is-upcoming {
+  box-shadow: inset 0 0 0 2px var(--green);
+  border-radius: 7px;
+}
+
+.rl-row.active {
+  background: var(--green-2);
+  box-shadow: inset 0 0 0 2px var(--green);
+  border-radius: 7px;
+}
+
+.rl-num {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  min-width: 34px;
+  height: 34px;
+  padding: 0 6px;
+  border-radius: 7px;
+  background: var(--green);
+  color: #fff;
+  font-weight: 900;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rl-row.is-special .rl-num { background: var(--gold); }
+
+.rl-num .memo-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--wine);
+}
+
+.rl-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.rl-line1 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.rl-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 800;
+  font-size: 13.5px;
+}
+
+.rl-grade {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  height: 17px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 900;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.rl-grade.grade-g { background: var(--wine); }
+
+.rl-line2 {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 7px;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.rl-time {
+  color: var(--ink);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.rl-done {
+  color: var(--green);
+  font-weight: 800;
+}
+
+.rl-flex { flex: 1 1 auto; }
+
+.rl-line2 .rb-conf {
+  font-size: 10px;
+  padding: 0 6px;
+}
+
+.rl-line2 .rb-nerai {
+  min-width: 18px;
+  height: 18px;
+  font-size: 11px;
+}
+
+/* ==================== 予想ビューへの切替 ==================== */
+.race-view-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 12px;
+}
+
+.back-btn {
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.back-btn:hover {
+  background: var(--green-2);
+  border-color: var(--green);
+}
+
+.race-view-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 900;
+  color: var(--ink);
+}
+
+/* スマホ幅では1画面に最大2列（南関は基本1場開催、多くても2場開催）。 */
+@media (max-width: 620px) {
+  .track-col {
+    flex-basis: 46vw;
+    max-width: 46vw;
+  }
+  .track-col.is-flatcol {
+    flex-basis: min(420px, 92vw);
+    max-width: min(420px, 92vw);
+  }
+  .race-view-title {
+    font-size: 13.5px;
+  }
+}
