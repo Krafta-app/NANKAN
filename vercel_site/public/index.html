@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#f7f3ea" />
     <title>南関競馬AI</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=20260705a" />
+    <link rel="stylesheet" href="/styles.css?v=20260707a" />
   </head>
   <body>
     <div class="shell">
@@ -56,6 +56,10 @@
           <div class="race-view-head">
             <button class="back-btn" id="backToList" type="button">← 一覧へ</button>
             <span class="race-view-title" id="raceViewTitle"></span>
+            <div class="race-nav" aria-label="前後レース移動">
+              <button class="race-nav-btn" id="prevRace" type="button" title="前レースへ" aria-label="前レースへ">←</button>
+              <button class="race-nav-btn" id="nextRace" type="button" title="次レースへ" aria-label="次レースへ">→</button>
+            </div>
           </div>
           <section class="workspace">
             <aside class="eval-aside" id="raceSummary" aria-label="評価一覧"></aside>
@@ -89,6 +93,6 @@
       </div>
     </template>
 
-    <script src="/app.js?v=20260705a" defer></script>
+    <script src="/app.js?v=20260707a" defer></script>
   </body>
 </html>

@@ -9,6 +9,41 @@ const {
 } = require("./_supabase");
 
 const RACE_RETENTION_DAYS = 7;
+const NEXT_DAY_SWITCH_MINUTES = 22 * 60;
+
+function jstParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  return Object.fromEntries(parts.map((part) => [part.type, part.value]));
+}
+
+function jstDateKey(offsetDays = 0) {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + Number(offsetDays || 0));
+  const parts = jstParts(date);
+  return `${parts.year}${parts.month}${parts.day}`;
+}
+
+function jstMinutesNow() {
+  const parts = jstParts();
+  return Number(parts.hour || 0) * 60 + Number(parts.minute || 0);
+}
+
+function pickDefaultDate(dates) {
+  const available = new Set(dates || []);
+  const today = jstDateKey(0);
+  const tomorrow = jstDateKey(1);
+  if (jstMinutesNow() >= NEXT_DAY_SWITCH_MINUTES && available.has(tomorrow)) return tomorrow;
+  if (available.has(today)) return today;
+  return dates?.[0] || "";
+}
 
 module.exports = async function handler(req, res) {
   if (handleOptions(req, res)) return;
@@ -37,7 +72,8 @@ module.exports = async function handler(req, res) {
       }).catch(() => []),
     ]);
     const dates = [...new Set((dateRows || []).map((race) => race.date).filter(Boolean))];
-    const selectedDate = requestedDate || dates[0] || "";
+    const defaultDate = pickDefaultDate(dates);
+    const selectedDate = requestedDate || defaultDate;
 
     const query = {
       select:
@@ -67,6 +103,7 @@ module.exports = async function handler(req, res) {
       dates,
       places,
       latestDate: dates[0] || null,
+      defaultDate: defaultDate || null,
       selectedDate: selectedDate || null,
     });
   } catch (err) {

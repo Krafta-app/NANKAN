@@ -1885,6 +1885,7 @@ textarea {
 }
 
 .race-view-title {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1892,6 +1893,37 @@ textarea {
   font-size: 15px;
   font-weight: 900;
   color: var(--ink);
+}
+
+.race-nav {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.race-nav-btn {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--green);
+  font-size: 18px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.race-nav-btn:hover:not(:disabled) {
+  background: var(--green-2);
+  border-color: var(--green);
+}
+
+.race-nav-btn:disabled {
+  cursor: default;
+  opacity: 0.38;
 }
 
 /* スマホ幅では1画面に最大2列（南関は基本1場開催、多くても2場開催）。 */
@@ -1905,6 +1937,13 @@ textarea {
     max-width: min(420px, 92vw);
   }
   .race-view-title {
+    flex-basis: calc(100% - 150px);
     font-size: 13.5px;
+  }
+  .race-view-head {
+    flex-wrap: wrap;
+  }
+  .race-nav {
+    margin-left: auto;
   }
 }

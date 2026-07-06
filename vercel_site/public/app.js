@@ -19,6 +19,8 @@ const state = {
   sortMode: readStoredSortMode(), // "race"（レース順）| "conf"（信用度が高い順）
   nerai: {},                    // race_key -> { isTarget, count, ... }
   neraiReq: "",                 // 直近に投げた狙い判定リクエストの識別子（stale判定用）
+  neraiTimer: 0,
+  neraiTimerKind: "",
   demo: new URLSearchParams(location.search).has("demo"),
 };
 
@@ -47,7 +49,7 @@ function cacheElements() {
   for (const id of [
     "statusLine", "pinBox", "pinInput", "refreshButton",
     "dateSelect", "placeSelect", "raceRail", "raceSummary",
-    "listView", "raceView", "backToList", "raceViewTitle", "sortByRace", "sortByConf",
+    "listView", "raceView", "backToList", "raceViewTitle", "prevRace", "nextRace", "sortByRace", "sortByConf",
     "panelPace", "panelOdds", "panelIndex", "panelAi", "panelMatch", "panelMemo",
   ]) {
     els[id] = document.getElementById(id);
@@ -81,6 +83,8 @@ function bindEvents() {
   els.sortByRace?.addEventListener("click", () => setSortMode("race"));
   els.sortByConf?.addEventListener("click", () => setSortMode("conf"));
   els.backToList?.addEventListener("click", () => backToList());
+  els.prevRace?.addEventListener("click", () => moveRace(-1));
+  els.nextRace?.addEventListener("click", () => moveRace(1));
   renderSortToggle();
 }
 
@@ -105,6 +109,38 @@ function backToList() {
   renderRaceBoard();
   setStatus(listStatusText());
   requestAnimationFrame(scrollBoardToUpcoming);
+}
+
+function raceNavList() {
+  return [...state.races].sort((a, b) => {
+    const p = String(a.place_code || a.place_name || "").localeCompare(String(b.place_code || b.place_name || ""), "ja");
+    if (p) return p;
+    return numVal(a.race_num) - numVal(b.race_num);
+  });
+}
+
+function raceNavIndex() {
+  return raceNavList().findIndex((race) => race.race_key === state.currentRaceKey);
+}
+
+function renderRaceNav() {
+  if (!els.prevRace || !els.nextRace) return;
+  const list = raceNavList();
+  const idx = raceNavIndex();
+  const prev = idx > 0 ? list[idx - 1] : null;
+  const next = idx >= 0 && idx < list.length - 1 ? list[idx + 1] : null;
+  els.prevRace.disabled = !prev;
+  els.nextRace.disabled = !next;
+  els.prevRace.title = prev ? `前レースへ: ${prev.place_name || ""}${prev.race_num ?? ""}R` : "前レースはありません";
+  els.nextRace.title = next ? `次レースへ: ${next.place_name || ""}${next.race_num ?? ""}R` : "次レースはありません";
+}
+
+function moveRace(direction) {
+  const list = raceNavList();
+  const idx = raceNavIndex();
+  const next = list[idx + direction];
+  if (!next) return;
+  void loadRace(next.race_key);
 }
 
 function setSortMode(mode) {
@@ -147,13 +183,18 @@ async function boot() {
     renderSetupState();
     return;
   }
-  await loadAllNotes();
+  const notesReady = loadAllNotes();
   await loadRaces();
+  void notesReady.then(() => {
+    if (state.races.length && state.view === "list") renderRaceBoard();
+  });
 }
 
 async function refreshAll() {
-  await loadAllNotes();
+  const notesReady = loadAllNotes();
   await loadRaces(true);
+  await notesReady;
+  if (state.races.length) renderRaceBoard();
   if (state.raceDetail?.race) void loadOdds();
 }
 
@@ -211,9 +252,10 @@ async function loadRaces(preserveRace = false) {
 
     state.races = data.races || [];
     state.places = data.places || [];
+    state.nerai = {};
     renderFilters();
     renderRaceBoard();
-    void loadNerai();
+    scheduleNeraiLoad();
 
     // 更新(refresh)時に予想ビューを見ていて、そのレースが残っていれば継続表示する。
     // それ以外（初回・開催変更）は一覧に留め、特定のレースは自動で開かない。
@@ -243,6 +285,7 @@ async function loadRace(raceKey) {
   }
   showRaceView();
   renderRaceBoard();
+  renderRaceNav();
   setStatus("レース詳細読込中");
   renderLoading(els.raceSummary, "予想を読み込み中");
 
@@ -253,12 +296,14 @@ async function loadRace(raceKey) {
     state.parsed = parsePrediction(state.raceDetail);
     renderAllPanels();
     setStatus(summaryLine());
+    renderRaceNav();
     void loadOdds();
     void ensureFullRaceForActiveTab();
   } catch (err) {
     state.raceDetail = null;
     state.parsed = null;
     renderAllPanels();
+    renderRaceNav();
     setStatus("読込エラー");
     renderEmpty(els.raceSummary, "レース詳細を取得できません", err.message);
   }
@@ -639,6 +684,28 @@ function tierCounts(race) {
 }
 
 // 「狙」判定を /api/nerai から取得し、一覧のバッジへ反映する。
+function scheduleNeraiLoad() {
+  if (state.neraiTimer) {
+    if (state.neraiTimerKind === "idle" && window.cancelIdleCallback) window.cancelIdleCallback(state.neraiTimer);
+    else clearTimeout(state.neraiTimer);
+    state.neraiTimer = 0;
+    state.neraiTimerKind = "";
+  }
+  const run = () => {
+    state.neraiTimer = 0;
+    state.neraiTimerKind = "";
+    void loadNerai();
+  };
+  if (window.requestIdleCallback) {
+    const idleId = window.requestIdleCallback(run, { timeout: 1800 });
+    state.neraiTimer = idleId;
+    state.neraiTimerKind = "idle";
+    return;
+  }
+  state.neraiTimer = setTimeout(run, 900);
+  state.neraiTimerKind = "timeout";
+}
+
 async function loadNerai() {
   const date = state.currentDate;
   const place = state.currentPlace;
