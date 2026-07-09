@@ -355,6 +355,7 @@ function parsePrediction(detail) {
 
   const result = {
     evalText: race.eval_list_text || "",
+    evalGradeByUma: evalGradesByUma(race.eval_list_text || ""),
     paceEl: null, indexEl: null, aiEl: null, matchEl: null,
     umaMap: {},          // umaban -> { name, uma_id, noteText }
     notedUmaban: new Set(),
@@ -929,6 +930,65 @@ function evalLineHtml(line, noted) {
   return h;
 }
 
+function evalGradesByUma(text) {
+  const out = {};
+  const re = /([SABCDEFG])((?:\s*\[\d{1,2}\])+)/g;
+  let m;
+  while ((m = re.exec(String(text || "")))) {
+    const grade = m[1];
+    for (const n of m[2].match(/\[(\d{1,2})\]/g) || []) {
+      const num = n.replace(/\D/g, "");
+      if (num) out[num] = grade;
+    }
+  }
+  return out;
+}
+
+function setRankElement(el, grade) {
+  for (const cls of [...el.classList]) {
+    if (/^rank-[SABCDEFG]$/.test(cls)) el.classList.remove(cls);
+  }
+  el.classList.add(`rank-${grade}`);
+  el.textContent = grade;
+}
+
+function umabanFromInlineText(text) {
+  const s = String(text || "");
+  const bracket = s.match(/\[(\d{1,2})\]/);
+  if (bracket) return bracket[1];
+  const circled = s.match(/[①-⑳]/);
+  if (circled) return String(circled[0].charCodeAt(0) - 0x245f);
+  return "";
+}
+
+function syncInlineRanksToEval(root, parsed) {
+  const gradeByUma = parsed?.evalGradeByUma || {};
+  if (!root || !Object.keys(gradeByUma).length) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+  let activeUma = "";
+  let node;
+  while ((node = walker.nextNode())) {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      if (node.classList?.contains("mark-btn") && node.dataset.uma) {
+        activeUma = String(node.dataset.uma);
+        continue;
+      }
+      const rankClass = [...(node.classList || [])].find((cls) => /^rank-[SABCDEFG]$/.test(cls));
+      const grade = gradeByUma[activeUma];
+      if (activeUma && grade && rankClass && /^[SABCDEFG]$/.test((node.textContent || "").trim())) {
+        setRankElement(node, grade);
+        activeUma = "";
+      }
+    } else if (node.nodeType === Node.TEXT_NODE) {
+      if (!activeUma) {
+        activeUma = umabanFromInlineText(node.nodeValue);
+      } else if (/(?:\n| \/ )/.test(node.nodeValue || "")) {
+        activeUma = "";
+      }
+    }
+  }
+}
+
 // 展開・相対評価・対戦表: data_html のセクションをそのまま流し込み、印ボタンを有効化。
 function renderSection(panel, sourceEl, label) {
   if (!state.raceDetail?.race) {
@@ -949,6 +1009,7 @@ function renderSection(panel, sourceEl, label) {
     wrap.appendChild(document.importNode(node, true));
   }
   cleanupInline(wrap);
+  syncInlineRanksToEval(wrap, state.parsed);
   bindMarks(wrap);
   panel.replaceChildren(wrap);
 }
@@ -974,6 +1035,7 @@ function renderAi() {
     wrap.appendChild(document.importNode(node, true));
   }
   cleanupInline(wrap);
+  syncInlineRanksToEval(wrap, parsed);
   injectMemos(wrap, parsed);
   bindMarks(wrap);
   panel.replaceChildren(wrap);
