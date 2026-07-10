@@ -895,7 +895,10 @@ function renderEval() {
   const wrap = document.createElement("div");
   wrap.className = "eval-panel";
 
-  const lines = text.split("\n").map((line) => line.replace(/^【(?:総合評価|評価一覧)】\s*/, "")).filter((line) => line.trim());
+  const lines = text.split("\n")
+    .map((line) => line.replace(/^【(?:総合評価|評価一覧)】\s*/, ""))
+    .map(filterEvalChokyoLine)
+    .filter((line) => line.trim());
   for (const line of lines) {
     const row = document.createElement("div");
     row.className = "eval-line";
@@ -912,6 +915,27 @@ function renderEval() {
 
   els.raceSummary.replaceChildren(wrap);
   bindMarks(wrap);
+}
+
+function filterEvalChokyoLine(line) {
+  const raw = String(line || "").trim();
+  if (!raw) return "";
+  if (/^前回🕰️\s*[:：]/.test(raw)) return "";
+
+  const m = raw.match(/^(🕰️)\s*[:：]\s*(.*)$/);
+  if (!m) return raw;
+  const body = m[2].trim();
+  if (!body || !/\d+位\/\d+頭/.test(body)) return raw;
+
+  const starts = [...body.matchAll(/(?:\[\[R\]\])?\[\d{1,2}\]/g)].map((hit) => hit.index ?? 0);
+  if (!starts.length) return raw;
+
+  const items = starts.map((start, idx) => body.slice(start, starts[idx + 1] ?? body.length).trim()).filter(Boolean);
+  const kept = items.filter((item) => {
+    const rank = item.match(/(\d+)位\/\d+頭/);
+    return !rank || Number(rank[1]) <= 3;
+  });
+  return kept.length ? `${m[1]}： ${kept.join(" ")}` : "";
 }
 
 function evalLineHtml(line, noted) {

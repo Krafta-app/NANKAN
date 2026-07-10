@@ -8224,9 +8224,8 @@ def build_evaluation_list(grades, horses_data, scored_data=None):
                 d_str = f"({detail})" if detail else ""
                 tataki_items.append(f"[{u}]{d_str}")
         
-        # 同日・同コース調教順位。加点対象だけ赤字、加点なしも順位を表示する。
+        # 総合評価直下の🕰️は、基準タイム超と今走調教TOP3だけに絞る。
         chokyo_items = []
-        prev_chokyo_items = []
 
         def _item_sort_key(item):
             rk, u_num, _txt = item
@@ -8235,6 +8234,12 @@ def build_evaluation_list(grades, horses_data, scored_data=None):
         for u, d in scored_data.items():
             rk = d.get("chokyo_display_rank") or d.get("chokyo_red_rank")
             if rk:
+                try:
+                    rk_int = int(rk)
+                except (TypeError, ValueError):
+                    rk_int = 99
+                if rk_int > 3:
+                    continue
                 total = d.get("chokyo_display_total") or d.get("chokyo_red_total")
                 disp = d.get("chokyo_display_disp") or d.get("chokyo_rank_disp") or d.get("chokyo_time_disp") or ""
                 rank_note = f"{rk}位/{total}頭" if total else f"{rk}位"
@@ -8242,25 +8247,13 @@ def build_evaluation_list(grades, horses_data, scored_data=None):
                 item = f"[{u}][[SMALL]]{d_str}[[/SMALL]]"
                 if int(d.get("score_chokyo_top", 0) or 0) > 0:
                     item = f"[[R]]{item}[[/R]]"
-                chokyo_items.append((int(rk), int(u) if str(u).isdigit() else 99, item))
-
-            prev_rk = d.get("zen_chokyo_display_rank")
-            if not prev_rk:
-                continue
-            total = d.get("zen_chokyo_display_total")
-            disp = d.get("zen_chokyo_display_disp") or ""
-            rank_note = f"{prev_rk}位/{total}頭" if total else f"{prev_rk}位"
-            d_str = f"({disp} {rank_note})" if disp else f"({rank_note})"
-            prev_chokyo_items.append((int(prev_rk), int(u) if str(u).isdigit() else 99, f"[{u}][[SMALL]]{d_str}[[/SMALL]]"))
+                chokyo_items.append((rk_int, int(u) if str(u).isdigit() else 99, item))
 
         if chumoku_items:
             eval_text += f"\n🕰️： {' '.join(chumoku_items)}"
         if chokyo_items:
             chokyo_items.sort(key=_item_sort_key)
             eval_text += f"\n🕰️： {' '.join(t for _, _, t in chokyo_items)}"
-        if prev_chokyo_items:
-            prev_chokyo_items.sort(key=_item_sort_key)
-            eval_text += f"\n前回🕰️： {' '.join(t for _, _, t in prev_chokyo_items)}"
         if tataki_items:
             eval_text += f"\n叩2： {' '.join(tataki_items)}"
 
