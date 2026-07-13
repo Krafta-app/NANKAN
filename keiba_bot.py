@@ -6662,7 +6662,6 @@ def format_deterministic_evaluation(horses_data: dict, cyokyo_data: dict, scored
         tier = sc.get("relative_tier")
         rel_label = sc.get("no_relative_grade") or (f"相対{_rel_label_display(tier)}" if tier else "相対不明")
         speed_index = sc.get("common_speed_index")
-        speed_race_index = sc.get("common_speed_race_index")
         speed_same_max = sc.get("common_speed_same_max")
         speed_same_runs = int(sc.get("common_speed_same_runs", 0) or 0)
         speed_rank = sc.get("common_speed_rank")
@@ -6681,13 +6680,12 @@ def format_deterministic_evaluation(horses_data: dict, cyokyo_data: dict, scored
                     f"{abs(variant):.1f}秒/1000m補正"
                 )
             same_note = f"{float(speed_same_max):.1f}（{speed_same_runs}走）" if speed_same_max is not None else "なし"
-            race_note = f"{float(speed_race_index):.1f}" if speed_race_index is not None else "-"
             ref_note = speed_best.get('par_source', '')
             confidence = speed_best.get('reference_confidence', '')
             ref_disp = f" / {ref_note} 信頼:{confidence}" if ref_note else ""
             speed_line = (
-                f"【速度指数】今{float(speed_index):.1f}{rank_note} / レース内{race_note}"
-                f" / 同場同距離最高:{same_note}（近走{speed_runs}件）{ref_disp}{variant_note}\n"
+                f"【速度指数】指数:{float(speed_index):.1f}{rank_note}"
+                f" / 同場同距離:{same_note}（近走{speed_runs}件）{ref_disp}{variant_note}\n"
             )
 
         block = f"{circled_num}{horse_name}　{rank}\n"
@@ -9165,12 +9163,10 @@ def build_evaluation_list(grades, horses_data, scored_data=None):
         speed_items = []
         for u, d in scored_data.items():
             idx = d.get("common_speed_index")
-            race_idx = d.get("common_speed_race_index")
             rk = d.get("common_speed_rank")
             if idx is None or rk is None or int(rk) > 3:
                 continue
-            race_disp = f"/内{float(race_idx):.1f}" if race_idx is not None else ""
-            speed_items.append((int(rk), int(u) if str(u).isdigit() else 99, f"[{u}](今{float(idx):.1f}{race_disp})"))
+            speed_items.append((int(rk), int(u) if str(u).isdigit() else 99, f"[{u}]({float(idx):.1f})"))
         if speed_items:
             speed_items.sort(key=lambda x: (x[0], x[1]))
             eval_text += f"\n⚡速度： {' '.join(x[2] for x in speed_items)}"
@@ -9179,7 +9175,7 @@ def build_evaluation_list(grades, horses_data, scored_data=None):
 
 
 def build_speed_index_table(horses_data, scored_data):
-    """現在能力・レース内100・同場同距離最高の検証表。総合点には使わない。"""
+    """指数・同場同距離最高の検証表。総合点には使わない。"""
     rows = []
     for umaban, horse in (horses_data or {}).items():
         sc = (scored_data or {}).get(umaban) or (scored_data or {}).get(str(umaban)) or {}
@@ -9190,7 +9186,6 @@ def build_speed_index_table(horses_data, scored_data):
             'umaban': str(umaban),
             'name': str((horse or {}).get('name') or ''),
             'index': idx,
-            'race_index': sc.get('common_speed_race_index'),
             'same_max': sc.get('common_speed_same_max'),
             'same_runs': int(sc.get('common_speed_same_runs', 0) or 0),
             'rank': rank,
@@ -9220,7 +9215,6 @@ def build_speed_index_table(horses_data, scored_data):
             best_text = '比較可能な時計なし'
             adjust_text = '-'
         index_text = f"{float(row['index']):.1f}" if row['index'] is not None else '-'
-        race_index_text = f"{float(row['race_index']):.1f}" if row['race_index'] is not None else '-'
         same_text = (
             f"{float(row['same_max']):.1f} ({row['same_runs']}走)"
             if row['same_max'] is not None else '-'
@@ -9240,7 +9234,6 @@ def build_speed_index_table(horses_data, scored_data):
             f'<td>{html.escape(rank_text)}</td>'
             f'<td class="speed-horse">{mark}[{html.escape(row["umaban"])}] {html.escape(row["name"])}</td>'
             f'<td class="speed-value">{html.escape(index_text)}</td>'
-            f'<td class="speed-race-value">{html.escape(race_index_text)}</td>'
             f'<td>{html.escape(same_text)}</td>'
             f'<td>{row["runs"]}</td>'
             f'<td><small>{html.escape(best_text)}</small></td>'
@@ -9248,12 +9241,12 @@ def build_speed_index_table(horses_data, scored_data):
             '</tr>'
         )
     return (
-        '<div class="speed-index-note">今の指数は平均級70・レコード級100。レース内は最高馬を100に換算。'
-        '同場同距離最高は取得済み近走内の自己最高です。総合点には加算しません。'
+        '<div class="speed-index-note">指数は平均級70・レコード級100。'
+        '同場同距離は取得済み近走内の自己最高です。総合点には加算しません。'
         'JRA・他地方は日別補正なしで、競馬場・芝ダート・距離別基準を使います。</div>'
         '<div class="table-wrap"><table class="speed-index-table">'
-        '<thead><tr><th>順位</th><th>馬</th><th>今の指数</th><th>レース内</th>'
-        '<th>同場同距離最高</th><th>近走</th><th>最良走</th><th>基準・補正</th></tr></thead>'
+        '<thead><tr><th>順位</th><th>馬</th><th>指数</th>'
+        '<th>同場同距離</th><th>近走</th><th>最良走</th><th>基準・補正</th></tr></thead>'
         f'<tbody>{"".join(body)}</tbody></table></div>'
     )
 
@@ -9410,12 +9403,11 @@ def generate_html_output(year, month, day, place_name, r_num, header1, pace_text
         .tab-content.active {{ display: block; }}
         .content-box {{ background: var(--box-bg); padding: 12px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 15px; overflow-x: auto; }}
         .speed-index-note {{ margin: 0 0 10px; color: #667085; font-size: 0.82em; line-height: 1.45; }}
-        .speed-index-table {{ width: 100%; min-width: 900px; border-collapse: collapse; font-size: 0.9em; }}
+        .speed-index-table {{ width: 100%; min-width: 780px; border-collapse: collapse; font-size: 0.9em; }}
         .speed-index-table th, .speed-index-table td {{ padding: 7px 6px; border-bottom: 1px solid var(--border); text-align: center; white-space: nowrap; }}
         .speed-index-table th {{ background: #f5f7fa; color: #667085; }}
         .speed-index-table .speed-horse {{ text-align: left; font-weight: bold; }}
         .speed-index-table .speed-value {{ color: #b42318; font-size: 1.15em; font-weight: bold; font-variant-numeric: tabular-nums; }}
-        .speed-index-table .speed-race-value {{ color: #175cd3; font-weight: bold; font-variant-numeric: tabular-nums; }}
         pre {{ white-space: pre-wrap; font-family: inherit; margin: 0; font-size: 0.95em; }}
         .pace-stable-note {{ display: block; font-size: 0.78em; color: #667085; line-height: 1.35; margin: 0 0 2px 1.6em; }}
         

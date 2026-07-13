@@ -133,6 +133,24 @@ class CommonSpeedIndexTests(unittest.TestCase):
         self.assertIsNotNone(result["1"]["same_condition_max"])
         self.assertEqual(result["1"]["same_condition_runs"], 1)
 
+    def test_speed_table_displays_only_two_index_types(self):
+        horses = {"1": {"name": "テストホース"}}
+        scored = {"1": {
+            "common_speed_index": 82.5,
+            "common_speed_race_index": 100.0,
+            "common_speed_same_max": 86.1,
+            "common_speed_same_runs": 2,
+            "common_speed_rank": 1,
+            "common_speed_runs": 5,
+            "common_speed_best_run": {},
+        }}
+        table = kb.build_speed_index_table(horses, scored)
+        self.assertIn("<th>指数</th>", table)
+        self.assertIn("<th>同場同距離</th>", table)
+        self.assertNotIn("今の指数", table)
+        self.assertNotIn("<th>レース内</th>", table)
+        self.assertNotIn("100.0", table)
+
 
 class RelativeTierConsistencyAdditionalTests(unittest.TestCase):
     def test_missing_comparison_does_not_count_as_unbeaten(self):

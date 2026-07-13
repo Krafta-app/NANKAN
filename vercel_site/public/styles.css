@@ -503,7 +503,7 @@ select {
 
 #panelSpeed .speed-index-table {
   width: 100%;
-  min-width: 900px;
+  min-width: 780px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -530,12 +530,6 @@ select {
 #panelSpeed .speed-index-table .speed-value {
   color: #b42318;
   font-size: 16px;
-  font-weight: 900;
-  font-variant-numeric: tabular-nums;
-}
-
-#panelSpeed .speed-index-table .speed-race-value {
-  color: #175cd3;
   font-weight: 900;
   font-variant-numeric: tabular-nums;
 }

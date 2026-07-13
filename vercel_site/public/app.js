@@ -745,6 +745,19 @@ function renderSpeed() {
   renderSection(panel, state.parsed?.speedEl, "指数");
   const table = panel?.querySelector(".speed-index-table");
   if (!table) return;
+  // 保存済みHTMLが旧3指数表示でも、閲覧時は「指数」「同場同距離」の2指数に統一する。
+  const headers = Array.from(table.querySelectorAll("thead th"));
+  const raceIndexColumn = headers.findIndex((th) => (th.textContent || "").trim() === "レース内");
+  if (raceIndexColumn >= 0) {
+    for (const row of table.querySelectorAll("tr")) {
+      row.children[raceIndexColumn]?.remove();
+    }
+  }
+  for (const th of table.querySelectorAll("thead th")) {
+    const label = (th.textContent || "").trim();
+    if (label === "今の指数") th.textContent = "指数";
+    if (label === "同場同距離最高") th.textContent = "同場同距離";
+  }
   const head = table.querySelector("thead tr");
   if (head) {
     const th = document.createElement("th");
@@ -1593,10 +1606,10 @@ function demoHtml(race) {
     </div>
     <div id="tab-pace" class="tab-content"><div class="content-box"><pre>【展開予想】\nハナは[1]サンプルスター。番手に[3]。\nMペース想定。</pre></div></div>
     <div id="tab-speed-index" class="tab-content"><div class="content-box">
-      <div class="speed-index-note">今の指数は平均級70・レコード級100。レース内は最高馬を100に換算。同場同距離最高も併記します。</div>
-      <div class="table-wrap"><table class="speed-index-table"><thead><tr><th>順位</th><th>馬</th><th>今の指数</th><th>レース内</th><th>同場同距離最高</th><th>近走</th><th>最良走</th><th>基準・補正</th></tr></thead><tbody>
-        <tr><td>1</td><td class="speed-horse">[1] サンプルスター</td><td class="speed-value">86.4</td><td class="speed-race-value">100.0</td><td>91.2 (2走)</td><td>5</td><td>川崎ダ1400m</td><td>川崎ダ1400m基準・信頼高</td></tr>
-        <tr><td>2</td><td class="speed-horse">[3] カワサキロード</td><td class="speed-value">82.8</td><td class="speed-race-value">96.4</td><td>-</td><td>5</td><td>東京ダ1400m</td><td>東京ダ1400m基準・日別補正なし</td></tr>
+      <div class="speed-index-note">指数は平均級70・レコード級100。同場同距離は取得済み近走内の自己最高です。</div>
+      <div class="table-wrap"><table class="speed-index-table"><thead><tr><th>順位</th><th>馬</th><th>指数</th><th>同場同距離</th><th>近走</th><th>最良走</th><th>基準・補正</th></tr></thead><tbody>
+        <tr><td>1</td><td class="speed-horse">[1] サンプルスター</td><td class="speed-value">86.4</td><td>91.2 (2走)</td><td>5</td><td>川崎ダ1400m</td><td>川崎ダ1400m基準・信頼高</td></tr>
+        <tr><td>2</td><td class="speed-horse">[3] カワサキロード</td><td class="speed-value">82.8</td><td>-</td><td>5</td><td>東京ダ1400m</td><td>東京ダ1400m基準・日別補正なし</td></tr>
       </tbody></table></div>
     </div></div>
     <div id="tab-index" class="tab-content"><div class="content-box">相対評価テーブル（デモ）</div></div>
