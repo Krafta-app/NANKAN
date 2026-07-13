@@ -562,7 +562,7 @@ def _speed_variant_label(variant_per_1000):
 def calculate_common_speed_indices(horses_data, current_course='', current_dist='', cache_dir='cache', as_of=None):
     """近5走時計を平均70・レコード級100の共通指数へ変換する。
 
-    index=現在能力、race_index=出走馬内最高100、same_condition_max=同場同距離自己最高。
+    index=現在能力、same_condition_max=同場同距離自己最高。
     すべて独立検証軸で、総合点には加算しない。
     """
     meta_rows = _load_speed_race_meta(cache_dir)
@@ -691,13 +691,10 @@ def calculate_common_speed_indices(horses_data, current_course='', current_dist=
         }
 
     valid = [info['index'] for info in result.values() if info.get('index') is not None]
-    race_best = max(valid) if valid else None
     for info in result.values():
         if info.get('index') is not None:
             info['rank'] = 1 + sum(other > info['index'] for other in valid)
             info['total'] = len(valid)
-            # レース内最速馬を必ず100とし、絶対指数の点差はそのまま残す。
-            info['race_index'] = round(max(0.0, 100.0 - (race_best - info['index'])), 1)
     return result
 
 def _is_kankan_distance(dist):
@@ -6265,7 +6262,6 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
             "score_chokyo_race": 0,
             "relative_tier": relative_tiers.get(umaban),
             "common_speed_index": speed_info.get("index"),
-            "common_speed_race_index": speed_info.get("race_index"),
             "common_speed_same_max": speed_info.get("same_condition_max"),
             "common_speed_same_runs": speed_info.get("same_condition_runs", 0),
             "common_speed_same_best_run": speed_info.get("same_condition_best_run"),

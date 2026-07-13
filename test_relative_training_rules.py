@@ -82,7 +82,7 @@ class CommonSpeedIndexTests(unittest.TestCase):
         self.assertLess(result["1"]["index"], result["2"]["index"])
         self.assertEqual(result["1"]["best_run"]["variant_label"], "高速")
 
-    def test_race_fastest_index_is_always_100(self):
+    def test_race_relative_100_index_is_not_calculated(self):
         horses = {
             "1": {"hist": [{"time": 90.0, "dist": "1400", "place": "川崎", "date": "26.6.5", "url": "https://www.nankankeiba.com/result/2026060521000001.do"}]},
             "2": {"hist": [{"time": 91.4, "dist": "1400", "place": "川崎", "date": "26.6.5", "url": "https://www.nankankeiba.com/result/2026060521000001.do"}]},
@@ -90,11 +90,9 @@ class CommonSpeedIndexTests(unittest.TestCase):
         with patch.object(kb, "_load_speed_race_meta", return_value=self._meta_rows()), \
                 patch.object(kb, "_load_speed_history_rows", return_value=[]):
             result = kb.calculate_common_speed_indices(horses, as_of=datetime(2026, 6, 20))
-        self.assertEqual(max(info["race_index"] for info in result.values()), 100.0)
-        self.assertAlmostEqual(
-            result["1"]["race_index"] - result["2"]["race_index"],
-            result["1"]["index"] - result["2"]["index"],
-        )
+        self.assertNotIn("race_index", result["1"])
+        self.assertNotIn("race_index", result["2"])
+        self.assertGreater(result["1"]["index"], result["2"]["index"])
 
     def test_jra_transfer_is_indexed_without_daily_variant(self):
         horses = {
@@ -104,8 +102,7 @@ class CommonSpeedIndexTests(unittest.TestCase):
         with patch.object(kb, "_load_speed_race_meta", return_value=[]), \
                 patch.object(kb, "_load_speed_history_rows", return_value=[]):
             result = kb.calculate_common_speed_indices(horses, as_of=datetime(2026, 6, 20))
-        self.assertEqual(result["1"]["race_index"], 100.0)
-        self.assertLess(result["2"]["race_index"], 100.0)
+        self.assertGreater(result["1"]["index"], result["2"]["index"])
         self.assertEqual(result["1"]["best_run"]["variant_per_1000"], 0.0)
         self.assertTrue(result["1"]["best_run"]["is_transfer"])
 
@@ -137,7 +134,6 @@ class CommonSpeedIndexTests(unittest.TestCase):
         horses = {"1": {"name": "テストホース"}}
         scored = {"1": {
             "common_speed_index": 82.5,
-            "common_speed_race_index": 100.0,
             "common_speed_same_max": 86.1,
             "common_speed_same_runs": 2,
             "common_speed_rank": 1,
