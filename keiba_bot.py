@@ -109,6 +109,597 @@ def _is_sprint_distance(dist):
     d = _dist_to_int(dist)
     return 0 < d <= SPRINT_DISTANCE_MAX
 
+
+# ==================================================
+# 南関・共通実戦速度指数（総合点へは未加算の独立検証軸）
+# ==================================================
+# 保存32レースの時系列比較で、上位3頭捕捉と大敗型の抑制が両立した配合。
+SPEED_INDEX_TOP2_WEIGHT = 0.50
+SPEED_INDEX_RECENCY_WEIGHT = 0.50
+SPEED_INDEX_VOLATILITY_PENALTY = 0.20
+SPEED_INDEX_AVERAGE_SCORE = 70.0
+SPEED_INDEX_RECORD_SCORE = 100.0
+SPEED_INDEX_MIN_SCORE = 20.0
+SPEED_INDEX_MAX_SCORE = 105.0
+SPEED_INDEX_DAILY_VARIANT_MIN_RACES = 3
+SPEED_INDEX_DAILY_VARIANT_MIN_DISTANCES = 2
+SPEED_INDEX_DAILY_VARIANT_CAP = 1.5  # 秒/1000m
+SPEED_INDEX_DAILY_VARIANT_SHRINKAGE = 0.10  # 32レース時系列検証で過補正を防いだ採用率
+_SPEED_META_CACHE = {"signature": None, "rows": []}
+_SPEED_HISTORY_CACHE = {"signature": None, "rows": []}
+_NANKAN_SPEED_PLACES = {'川崎', '船橋', '浦和', '大井'}
+_JRA_SPEED_PLACES = {'JRA', '札幌', '函館', '福島', '新潟', '東京', '中山', '中京', '京都', '阪神', '小倉'}
+
+
+def _winner_clock_to_seconds(value):
+    """対戦表の勝時計(例: 549/1324/2163)を秒へ変換する。"""
+    digits = re.sub(r'\D', '', str(value or ''))
+    if len(digits) < 3:
+        return None
+    try:
+        tenths = int(digits[-1])
+        whole = int(digits[:-1])
+        minutes, seconds = divmod(whole, 100)
+        if seconds >= 60:
+            return None
+        return minutes * 60 + seconds + tenths / 10.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _speed_class_bucket(title):
+    """日別馬場差をクラス差から分離するための粗いクラス帯。"""
+    text = str(title or '').upper().replace(' ', '')
+    for label in ('A1', 'A2', 'B1', 'B2', 'B3', 'C1', 'C2', 'C3'):
+        if label in text:
+            return label
+    if '2歳' in text:
+        return '2歳'
+    if '3歳' in text:
+        return '3歳'
+    return 'その他'
+
+
+def _load_speed_race_meta(cache_dir='cache'):
+    """保存済み対戦表から日付・場・馬場・距離・勝時計・クラスを読む。"""
+    try:
+        paths = sorted(
+            os.path.join(cache_dir, name)
+            for name in os.listdir(cache_dir)
+            if name.startswith('taisen_') and name.endswith('.html')
+        )
+    except OSError:
+        return []
+    signature = (
+        len(paths),
+        max((os.path.getmtime(path) for path in paths), default=0),
+        sum((os.path.getsize(path) for path in paths), 0),
+    )
+    if _SPEED_META_CACHE.get('signature') == signature:
+        return list(_SPEED_META_CACHE.get('rows') or [])
+
+    pattern = re.compile(
+        r"openMovieForStrobeMediaPlayback\('(\d+)'\).*?"
+        r'<p class="nk23_c-table08__detail">(.*?)</p>',
+        re.S,
+    )
+    by_race = {}
+    for path in paths:
+        try:
+            with open(path, encoding='utf-8', errors='ignore') as fh:
+                page = fh.read()
+        except OSError:
+            continue
+        for match in pattern.finditer(page):
+            race_id, body = match.groups()
+            plain = re.sub(r'<br\s*/?>', '|', body)
+            plain = re.sub(r'<[^>]+>', '', plain)
+            parts = [re.sub(r'\s+', ' ', html.unescape(x)).strip() for x in plain.split('|')]
+            if len(parts) < 3:
+                continue
+            date = parse_date(parts[0])
+            venue_parts = parts[1].split()
+            nums = re.findall(r'\d+', parts[2])
+            if date == datetime.min or len(venue_parts) < 2 or len(nums) < 3:
+                continue
+            place, going = venue_parts[0], venue_parts[1]
+            if place not in {'川崎', '船橋', '浦和', '大井'}:
+                continue
+            winner_time = _winner_clock_to_seconds(nums[2])
+            dist = _dist_to_int(nums[1])
+            if winner_time is None or dist <= 0:
+                continue
+            title = parts[3] if len(parts) >= 4 else ''
+            by_race[race_id] = {
+                'race_id': race_id,
+                'date': date.strftime('%Y.%m.%d'),
+                'place': place,
+                'going': going,
+                'dist': dist,
+                'winner_time': winner_time,
+                'class_bucket': _speed_class_bucket(title),
+                'title': title,
+            }
+
+    rows = list(by_race.values())
+    _SPEED_META_CACHE['signature'] = signature
+    _SPEED_META_CACHE['rows'] = rows
+    return list(rows)
+
+
+def _median_or_none(values):
+    vals = [float(v) for v in values if v is not None and math.isfinite(float(v))]
+    return statistics.median(vals) if vals else None
+
+
+def _normalize_speed_surface(place, surface=''):
+    surface = str(surface or '').strip()
+    if surface in {'芝', 'ダ', '障'}:
+        return surface
+    return '' if str(place or '') in _JRA_SPEED_PLACES else 'ダ'
+
+
+def _speed_reference_category(place):
+    place = str(place or '')
+    if place in _NANKAN_SPEED_PLACES:
+        return '南関'
+    if place in _JRA_SPEED_PLACES:
+        return 'JRA'
+    return '他地方'
+
+
+def _load_speed_history_rows(cache_dir='backtest_data'):
+    """保存済み近走時計を重複除去し、全競馬場の基準時計素材として読む。"""
+    try:
+        paths = sorted(
+            os.path.join(cache_dir, name)
+            for name in os.listdir(cache_dir)
+            if name.endswith('.json')
+        )
+    except OSError:
+        paths = []
+    persistent_path = os.path.join('cache', 'speed_history_reference.json')
+    if os.path.exists(persistent_path):
+        paths.append(persistent_path)
+    signature = (
+        len(paths),
+        max((os.path.getmtime(path) for path in paths), default=0),
+        sum((os.path.getsize(path) for path in paths), 0),
+    )
+    if _SPEED_HISTORY_CACHE.get('signature') == signature:
+        return [dict(row) for row in (_SPEED_HISTORY_CACHE.get('rows') or [])]
+
+    rows = []
+    seen = set()
+    for path in paths:
+        try:
+            with open(path, encoding='utf-8') as fh:
+                payload = json.load(fh)
+        except (OSError, ValueError, TypeError):
+            continue
+        if isinstance(payload.get('rows'), list):
+            stored_horses = {
+                str(idx): {'name': row.get('horse_name', ''), 'hist': [row]}
+                for idx, row in enumerate(payload.get('rows') or [])
+                if isinstance(row, dict)
+            }
+        else:
+            stored_horses = payload.get('horses') or {}
+        for horse in stored_horses.values():
+            horse_name = str((horse or {}).get('name') or '')
+            for run in (horse or {}).get('hist', []):
+                place = str((run or {}).get('source_place') or (run or {}).get('place') or '')
+                if not place or place == '不明':
+                    continue
+                dist = _dist_to_int((run or {}).get('dist'))
+                try:
+                    run_time = float((run or {}).get('time') or 0)
+                except (TypeError, ValueError):
+                    continue
+                if dist <= 0 or run_time <= 0:
+                    continue
+                run_date = parse_date(str((run or {}).get('date') or ''))
+                if run_date == datetime.min:
+                    continue
+                surface = _normalize_speed_surface(place, (run or {}).get('surface'))
+                dedupe_key = (horse_name, run_date, place, surface, dist, round(run_time, 2))
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                rows.append({
+                    'horse_name': horse_name,
+                    'date': run_date,
+                    'place': place,
+                    'surface': surface,
+                    'dist': dist,
+                    'time': run_time,
+                })
+
+    _SPEED_HISTORY_CACHE.update({'signature': signature, 'rows': rows})
+    return [dict(row) for row in rows]
+
+
+def _persist_speed_history_rows(horses_data, path=os.path.join('cache', 'speed_history_reference.json')):
+    """新しく取得した近走を競馬場・芝ダート別の基準素材としてローカル蓄積する。"""
+    existing = []
+    try:
+        with open(path, encoding='utf-8') as fh:
+            payload = json.load(fh)
+            if isinstance(payload.get('rows'), list):
+                existing = payload['rows']
+    except (OSError, ValueError, TypeError):
+        existing = []
+
+    by_key = {}
+    for row in existing:
+        if not isinstance(row, dict):
+            continue
+        key = (
+            str(row.get('horse_name') or ''), str(row.get('date') or ''),
+            str(row.get('source_place') or row.get('place') or ''),
+            str(row.get('surface') or ''), _dist_to_int(row.get('dist')),
+            str(row.get('time') or ''),
+        )
+        by_key[key] = row
+    for horse in (horses_data or {}).values():
+        horse_name = str((horse or {}).get('name') or '')
+        for hist in (horse or {}).get('hist', []):
+            place = str((hist or {}).get('source_place') or (hist or {}).get('place') or '')
+            dist = _dist_to_int((hist or {}).get('dist'))
+            try:
+                run_time = float((hist or {}).get('time') or 0)
+            except (TypeError, ValueError):
+                continue
+            if not place or place == '不明' or dist <= 0 or run_time <= 0:
+                continue
+            surface = _normalize_speed_surface(place, (hist or {}).get('surface'))
+            row = {
+                'horse_name': horse_name,
+                'date': str((hist or {}).get('date') or ''),
+                'place': str((hist or {}).get('place') or ''),
+                'source_place': place,
+                'surface': surface,
+                'dist': dist,
+                'time': run_time,
+            }
+            key = (horse_name, row['date'], place, surface, dist, str(run_time))
+            by_key[key] = row
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = f'{path}.tmp'
+        with open(tmp_path, 'w', encoding='utf-8') as fh:
+            json.dump({'version': 1, 'rows': list(by_key.values())[-20000:]}, fh, ensure_ascii=False)
+        os.replace(tmp_path, path)
+        _SPEED_HISTORY_CACHE['signature'] = None
+    except OSError:
+        pass
+
+
+def _speed_record_scale(values, dist):
+    """平均級=70、レコード級=100に使う頑健な2基準を返す。"""
+    vals = sorted(float(v) for v in values if v is not None and math.isfinite(float(v)))
+    if not vals:
+        return None
+    average_time = statistics.median(vals)
+    # 大標本では最速1件の誤抽出を避けて2番目、小標本では最速値を使う。
+    fastest_credible = vals[1] if len(vals) >= 20 else vals[0]
+    min_gap = 2.5 * float(dist) / 1000.0
+    max_gap = 10.0 * float(dist) / 1000.0
+    record_time = max(fastest_credible, average_time - max_gap)
+    record_time = min(record_time, average_time - min_gap)
+    return {
+        'average_time': average_time,
+        'record_time': record_time,
+        'samples': len(vals),
+    }
+
+
+def _build_speed_scales(history_rows, daily_variants, as_of):
+    exact_surface = {}
+    exact_distance = {}
+    category_surface = {}
+    category_distance = {}
+    groups = ({}, {}, {}, {})
+    for row in history_rows or []:
+        run_date = row.get('date')
+        if isinstance(as_of, datetime) and isinstance(run_date, datetime) and run_date >= as_of:
+            continue
+        place = str(row.get('place') or '')
+        surface = _normalize_speed_surface(place, row.get('surface'))
+        dist = _dist_to_int(row.get('dist'))
+        try:
+            run_time = float(row.get('time') or 0)
+        except (TypeError, ValueError):
+            continue
+        if not place or place == '不明' or dist <= 0 or run_time <= 0:
+            continue
+        if place in _NANKAN_SPEED_PLACES and isinstance(run_date, datetime):
+            variant = daily_variants.get((run_date.strftime('%Y.%m.%d'), place), 0.0)
+            run_time -= variant * dist / 1000.0
+        category = _speed_reference_category(place)
+        keys = (
+            (place, surface, dist),
+            (place, dist),
+            (category, surface, dist),
+            (category, dist),
+        )
+        for group, key in zip(groups, keys):
+            group.setdefault(key, []).append(run_time)
+
+    for source, target in zip(groups, (exact_surface, exact_distance, category_surface, category_distance)):
+        for key, values in source.items():
+            scale = _speed_record_scale(values, key[-1])
+            if scale:
+                target[key] = scale
+    return {
+        'exact_surface': exact_surface,
+        'exact_distance': exact_distance,
+        'category_surface': category_surface,
+        'category_distance': category_distance,
+    }
+
+
+def _blend_speed_scales(exact, fallback, label):
+    if not exact:
+        if not fallback:
+            return None
+        return dict(fallback, source=label, confidence='共通')
+    if not fallback:
+        return dict(exact, source=label, confidence='競馬場別')
+    n = int(exact.get('samples', 0) or 0)
+    reliability = n / (n + 8.0)
+    return {
+        'average_time': reliability * exact['average_time'] + (1.0 - reliability) * fallback['average_time'],
+        'record_time': reliability * exact['record_time'] + (1.0 - reliability) * fallback['record_time'],
+        'samples': n,
+        'source': label,
+        'confidence': '高' if n >= 20 else '中' if n >= 8 else '暫定',
+    }
+
+
+def _speed_scale_for_run(place, surface, dist, scales):
+    category = _speed_reference_category(place)
+    surface = _normalize_speed_surface(place, surface)
+    exact = scales['exact_surface'].get((place, surface, dist))
+    if exact is None:
+        exact = scales['exact_distance'].get((place, dist))
+    fallback = scales['category_surface'].get((category, surface, dist))
+    if fallback is None:
+        fallback = scales['category_distance'].get((category, dist))
+    if exact or fallback:
+        return _blend_speed_scales(exact, fallback, f'{place}{surface}{dist}m基準')
+
+    candidates = [
+        (abs(int(other_dist) - int(dist)), int(other_dist), scale)
+        for (cat, other_dist), scale in scales['category_distance'].items()
+        if cat == category
+    ]
+    if not candidates:
+        return None
+    _gap, base_dist, base = min(candidates)
+    ratio = float(dist) / float(base_dist)
+    return {
+        'average_time': base['average_time'] * ratio,
+        'record_time': base['record_time'] * ratio,
+        'samples': base.get('samples', 0),
+        'source': f'{category}{base_dist}m近似',
+        'confidence': '近似',
+    }
+
+
+def _build_speed_reference(meta_rows):
+    """共通時計基準と開催日別の高速・低速馬場差を作る。
+
+    日別馬場差は、各勝時計を別日の同場・同距離・同馬場状態・同クラス帯と比較し、
+    秒/1000mへ揃えて同日複数距離の中央値を取る。最低3競走かつ2距離を必要とする。
+    推定誤差を抑えるため、実際に指数へ使う量は推定値の10%へ縮約する。
+    負値=高速、正値=低速。
+    """
+    rows = [r for r in (meta_rows or []) if r.get('winner_time') and r.get('dist')]
+    by_pd = {}
+    by_pdg = {}
+    by_pdgc = {}
+    for row in rows:
+        pd = (row['place'], int(row['dist']))
+        pdg = pd + (row.get('going') or '',)
+        pdgc = pdg + (row.get('class_bucket') or 'その他',)
+        by_pd.setdefault(pd, []).append(row)
+        by_pdg.setdefault(pdg, []).append(row)
+        by_pdgc.setdefault(pdgc, []).append(row)
+
+    # 能力比較用の共通基準。クラスでは割らず、速いクラスの時計を高く評価できるようにする。
+    common_par = {}
+    for key, group in by_pd.items():
+        if len(group) >= 8:
+            common_par[key] = _median_or_none(r['winner_time'] for r in group)
+    for key, group in by_pdg.items():
+        if len(group) >= 6:
+            common_par[key] = _median_or_none(r['winner_time'] for r in group)
+
+    daily_residuals = {}
+    daily_distances = {}
+    for row in rows:
+        row_date = row['date']
+        group = by_pdgc.get(
+            (row['place'], int(row['dist']), row.get('going') or '', row.get('class_bucket') or 'その他'),
+            [],
+        )
+        candidates = [r['winner_time'] for r in group if r.get('date') != row_date]
+        if len(candidates) < 4:
+            continue
+        expected = _median_or_none(candidates)
+        if expected is None:
+            continue
+        residual_per_1000 = (float(row['winner_time']) - expected) * 1000.0 / int(row['dist'])
+        key = (row_date, row['place'])
+        daily_residuals.setdefault(key, []).append(residual_per_1000)
+        daily_distances.setdefault(key, set()).add(int(row['dist']))
+
+    daily_variants = {}
+    for key, residuals in daily_residuals.items():
+        if (len(residuals) < SPEED_INDEX_DAILY_VARIANT_MIN_RACES
+                or len(daily_distances.get(key, set())) < SPEED_INDEX_DAILY_VARIANT_MIN_DISTANCES):
+            continue
+        variant = _median_or_none(residuals)
+        if variant is None:
+            continue
+        raw_variant = max(
+            -SPEED_INDEX_DAILY_VARIANT_CAP,
+            min(SPEED_INDEX_DAILY_VARIANT_CAP, variant),
+        )
+        daily_variants[key] = raw_variant * SPEED_INDEX_DAILY_VARIANT_SHRINKAGE
+    return common_par, daily_variants
+
+
+def _speed_variant_label(variant_per_1000):
+    if variant_per_1000 <= -0.03:
+        return '高速'
+    if variant_per_1000 >= 0.03:
+        return '低速'
+    return '標準'
+
+
+def calculate_common_speed_indices(horses_data, current_course='', current_dist='', cache_dir='cache', as_of=None):
+    """近5走時計を平均70・レコード級100の共通指数へ変換する。
+
+    index=現在能力、race_index=出走馬内最高100、same_condition_max=同場同距離自己最高。
+    すべて独立検証軸で、総合点には加算しない。
+    """
+    meta_rows = _load_speed_race_meta(cache_dir)
+    _unused_common_par, daily_variants = _build_speed_reference(meta_rows)
+    meta_by_race = {r['race_id']: r for r in meta_rows}
+    if not isinstance(as_of, datetime):
+        _persist_speed_history_rows(horses_data)
+    as_of_dt = as_of if isinstance(as_of, datetime) else datetime.now()
+    history_rows = _load_speed_history_rows()
+
+    # 今回取得した近走も基準素材へ加える。過去保存分と重なる走りは除外する。
+    seen_rows = {
+        (row.get('horse_name'), row.get('date'), row.get('place'), row.get('surface'), row.get('dist'), round(float(row.get('time') or 0), 2))
+        for row in history_rows
+    }
+    for horse in (horses_data or {}).values():
+        horse_name = str((horse or {}).get('name') or '')
+        for hist in (horse or {}).get('hist', []):
+            place = str((hist or {}).get('source_place') or (hist or {}).get('place') or '')
+            dist = _dist_to_int((hist or {}).get('dist'))
+            run_date = parse_date(str((hist or {}).get('date') or ''))
+            try:
+                run_time = float((hist or {}).get('time') or 0)
+            except (TypeError, ValueError):
+                continue
+            if not place or place == '不明' or dist <= 0 or run_time <= 0 or run_date == datetime.min:
+                continue
+            surface = _normalize_speed_surface(place, (hist or {}).get('surface'))
+            key = (horse_name, run_date, place, surface, dist, round(run_time, 2))
+            if key in seen_rows:
+                continue
+            seen_rows.add(key)
+            history_rows.append({
+                'horse_name': horse_name, 'date': run_date, 'place': place,
+                'surface': surface, 'dist': dist, 'time': run_time,
+            })
+    scales = _build_speed_scales(history_rows, daily_variants, as_of_dt)
+    current_dist_int = _dist_to_int(current_dist)
+    result = {}
+
+    for umaban, horse in (horses_data or {}).items():
+        run_scores = []
+        for hist in (horse or {}).get('hist', [])[:5]:
+            try:
+                raw_time = float(hist.get('time'))
+            except (TypeError, ValueError):
+                continue
+            dist = _dist_to_int(hist.get('dist'))
+            place = str(hist.get('source_place') or hist.get('place') or '')
+            surface = _normalize_speed_surface(place, hist.get('surface'))
+            if raw_time <= 0 or dist <= 0 or not place or place == '不明':
+                continue
+            url = str(hist.get('url') or '')
+            race_match = re.search(r'/result/(\d+)\.do', url)
+            race_id = race_match.group(1) if race_match else ''
+            meta = meta_by_race.get(race_id, {})
+            is_nankan_run = place in _NANKAN_SPEED_PLACES
+            scale = _speed_scale_for_run(place, surface, dist, scales)
+            if not scale:
+                continue
+            run_date = parse_date(str(hist.get('date') or meta.get('date') or ''))
+            date_key = run_date.strftime('%Y.%m.%d') if run_date != datetime.min else meta.get('date', '')
+            # 開催日馬場差は南関4場だけ。JRA・他地方の転入走は競馬場/距離基準のみ。
+            variant = daily_variants.get((date_key, place), 0.0) if is_nankan_run else 0.0
+            # 高速馬場(variant<0)では時計を遅い側へ戻し、低速馬場では速い側へ戻す。
+            adjusted_time = raw_time - variant * dist / 1000.0
+            scale_range = max(0.5, float(scale['average_time']) - float(scale['record_time']))
+            run_index = (
+                SPEED_INDEX_AVERAGE_SCORE
+                + (SPEED_INDEX_RECORD_SCORE - SPEED_INDEX_AVERAGE_SCORE)
+                * (float(scale['average_time']) - adjusted_time) / scale_range
+            )
+            run_index = max(SPEED_INDEX_MIN_SCORE, min(SPEED_INDEX_MAX_SCORE, run_index))
+            days = max(0, (as_of_dt - run_date).days) if run_date != datetime.min else 180
+            run_scores.append({
+                'index': run_index,
+                'raw_time': raw_time,
+                'adjusted_time': adjusted_time,
+                'variant_per_1000': variant,
+                'variant_label': _speed_variant_label(variant),
+                'date': date_key,
+                'place': place,
+                'surface': surface,
+                'dist': dist,
+                'days': days,
+                'race_id': race_id,
+                'par_source': scale.get('source', ''),
+                'reference_confidence': scale.get('confidence', ''),
+                'reference_samples': scale.get('samples', 0),
+                'average_time': scale.get('average_time'),
+                'record_time': scale.get('record_time'),
+                'is_transfer': not is_nankan_run,
+            })
+        if not run_scores:
+            result[str(umaban)] = {'index': None, 'rank': None, 'runs': 0, 'corrected_runs': 0}
+            continue
+        values = sorted((r['index'] for r in run_scores), reverse=True)
+        top2 = statistics.mean(values[:2])
+        recency_weights = [math.exp(-r['days'] / 100.0) for r in run_scores]
+        recency = sum(r['index'] * w for r, w in zip(run_scores, recency_weights)) / sum(recency_weights)
+        volatility = statistics.pstdev(values) if len(values) >= 2 else 0.0
+        horse_index = (
+            SPEED_INDEX_TOP2_WEIGHT * top2
+            + SPEED_INDEX_RECENCY_WEIGHT * recency
+            - SPEED_INDEX_VOLATILITY_PENALTY * volatility
+        )
+        best_run = max(run_scores, key=lambda r: r['index'])
+        same_condition_runs = [
+            r for r in run_scores
+            if current_course and current_dist_int > 0
+            and r.get('place') == current_course and int(r.get('dist') or 0) == current_dist_int
+        ]
+        same_condition_best = max(same_condition_runs, key=lambda r: r['index']) if same_condition_runs else None
+        result[str(umaban)] = {
+            'index': round(horse_index, 1),
+            'rank': None,
+            'runs': len(run_scores),
+            'corrected_runs': sum(abs(r['variant_per_1000']) >= 0.03 for r in run_scores),
+            'best_run': best_run,
+            'same_condition_max': round(same_condition_best['index'], 1) if same_condition_best else None,
+            'same_condition_runs': len(same_condition_runs),
+            'same_condition_best_run': same_condition_best,
+            'top2': round(top2, 1),
+            'recency': round(recency, 1),
+            'volatility': round(volatility, 1),
+        }
+
+    valid = [info['index'] for info in result.values() if info.get('index') is not None]
+    race_best = max(valid) if valid else None
+    for info in result.values():
+        if info.get('index') is not None:
+            info['rank'] = 1 + sum(other > info['index'] for other in valid)
+            info['total'] = len(valid)
+            # レース内最速馬を必ず100とし、絶対指数の点差はそのまま残す。
+            info['race_index'] = round(max(0.0, 100.0 - (race_best - info['index'])), 1)
+    return result
+
 def _is_kankan_distance(dist):
     """根幹距離 (1200/1600/2000m)。これ以外は同場・同距離成績を絶対視する。"""
     return _dist_to_int(dist) in (1200, 1600, 2000)
@@ -732,6 +1323,7 @@ _REL_S_FLOOR = False                   # 最上位グループは必ずS(Sフロ
 _REL_C_CEILING = True                  # 確信できる負けが無い馬はCに沈めずBへ(C=ほぼ馬券圏外狙い)
 _REL_C_INTERNAL_WIN_PROMOTE = True     # 三軍内で複数馬に勝ち、三軍内負けなしなら二軍へ救済
 _REL_C_INTERNAL_WIN_MIN = 2
+_REL_MATCHUP_TIER_CONSISTENCY = True   # 上位への実比較と矛盾する二軍/三軍の所属・相対点を救済
 
 # 相対tier多層化(A): tier層化のレベルを4段階(S/A/B/C)にクランプせず、層の数だけ
 #  S→A→B→C→D→E… と割り当てて能力の上下関係の解像度を上げる。点数も4値固定では
@@ -766,6 +1358,81 @@ def _rel_label_to_score(label, race_max_idx):
     if race_max_idx <= 0:
         return _REL_TOP_SCORE
     return round(_REL_TOP_SCORE - (_REL_TOP_SCORE - _REL_BOTTOM_SCORE) * idx / race_max_idx, 1)
+
+
+def _apply_matchup_tier_consistency(tiers, matchup_matrix, matchup_source):
+    """上位グループとの採用済み比較に矛盾する二軍・三軍表示を救済する。
+
+    比較記録がない相手は「負けていない」に含めない。direct/bridge/mixed の
+    実比較だけを対象にする。上位tierへ勝っており、昇格で飛び越える各tierに
+    明示的な負けがなければ、勝った相手のtierまで上げる。例えば二軍が一軍に
+    勝っていても別の一軍に負けていれば、矛盾を無理に一方向へ解かず据え置く。
+    従来の主力ケア（主力に非敗なら二軍/三軍に置かず、互角は一軍）も残す。
+
+    相対点は救済後tierの既存配点（S=50/A=40/B=25/C=15）を使う。
+    配点表そのものは変更しない。
+    """
+    corrected = dict(tiers or {})
+    promotions = {}
+    accepted_sources = {"direct", "bridge", "mixed"}
+    tier_idx = {label: idx for idx, label in enumerate(("S", "A", "B", "C"))}
+
+    def _symbols_against(horse, opponents):
+        symbols = []
+        for opponent in opponents:
+            source = (matchup_source.get(horse, {}) or {}).get(opponent)
+            symbol = (matchup_matrix.get(horse, {}) or {}).get(opponent)
+            if source in accepted_sources and symbol in (">", "=", "<"):
+                symbols.append(symbol)
+        return symbols
+
+    for horse, tier in list(corrected.items()):
+        if tier not in ("B", "C"):
+            continue
+
+        original_idx = tier_idx[tier]
+        target = None
+        reason = None
+        relations = []
+
+        # 主力への非敗ケア。比較なしは対象外で、主力への負けが1つでもあれば発火しない。
+        top_horses = {h for h, label in tiers.items() if label == "S"}
+        top_symbols = _symbols_against(horse, top_horses)
+        if top_symbols and "<" not in top_symbols:
+            target = "S" if ">" in top_symbols else "A"
+            reason = "top_nonloss"
+            relations = top_symbols
+
+        # 一軍/二軍への明示的な勝ちをtierの下限として使う。
+        # 最も高い勝利先から調べ、飛び越える層への負けがあれば昇格を見送る。
+        if target is None:
+            for target_idx in range(original_idx):
+                target_label = ("S", "A", "B", "C")[target_idx]
+                target_horses = {h for h, label in tiers.items() if label == target_label}
+                target_symbols = _symbols_against(horse, target_horses)
+                if ">" not in target_symbols:
+                    continue
+                jumped_horses = {
+                    h for h, label in tiers.items()
+                    if target_idx <= tier_idx.get(label, 99) < original_idx
+                }
+                jumped_symbols = _symbols_against(horse, jumped_horses)
+                if "<" in jumped_symbols:
+                    continue
+                target = target_label
+                reason = "upper_tier_win"
+                relations = jumped_symbols
+                break
+
+        if target is not None:
+            corrected[horse] = target
+            promotions[horse] = {
+                "from": tier,
+                "to": target,
+                "reason": reason,
+                "relations": tuple(relations),
+            }
+    return corrected, promotions
 
 def _rel_tier_color(label):
     """tierラベル→表示色。S/A/B/Cは従来色、多層のD以降はレベルで青→灰へ。"""
@@ -1582,17 +2249,32 @@ DATA_DIR = "2025data"
 JOCKEY_FILE = os.path.join(DATA_DIR, "2025_NARJockey.csv")
 TRAINER_FILE = os.path.join(DATA_DIR, "2025_NankanTrainer.csv")
 POWER_FILE = os.path.join(DATA_DIR, "2025_騎手パワー.xlsx")
-SCORE_POLICY_VERSION = "v20260702b_pace_stable_chokyo_adjust"
+SCORE_POLICY_VERSION = "v20260714g_speed70_record100_exact_track_surface"
 
 # 当日各コース横断の調教上位(赤字)への加点。
 # 今走調教(中間追い切り含む)だけを対象に、同日・同じ調教場所・同じメトリクスで10頭以上いる場合のみ、3位以内を対象。
-# 配点は順位別: 1位+5 / 2位+3 / 3位+2。複数本の追い切りで複数グループの上位に入った場合は
-# 各グループの点を合算するが、合計の上限は +8 (3本とも1位でも +15 にはしない)。同タイムは同順位=同点。
+# 配点は順位別: 1位+5 / 2位+3 / 3位+2。複数本の追い切りが対象になっても、
+# その馬の最も高い全体順位1件だけを採用する。同タイムは同順位=同点。
 CHOKYO_TOP_POINTS = {1: 5, 2: 3, 3: 2}
-CHOKYO_TOP_BONUS_CAP = 8
+CHOKYO_RACE_POINTS = {1: 3, 2: 2, 3: 1}
+CHOKYO_RANK_BONUS_CAP = 8
+CHOKYO_TOP_BONUS_CAP = CHOKYO_RANK_BONUS_CAP  # 旧名互換
 CHOKYO_TOP_BONUS = 5  # 1位の点(互換用)
 CHOKYO_TOP_MIN_GROUP_SIZE = 10
 CHOKYO_RANK_DISPLAY_MIN_GROUP_SIZE = 3
+CHOKYO_RACE_MIN_HORSES = 5
+
+# レース内順位は異なる調教場の生時計を直接比べず、コース・メトリクス別の
+# 基準タイムに対する差（負荷補正後）で比較する。3Fは従来の基準超判定と同じ基準。
+CHOKYO_STANDARD_3F = {
+    '大井': 37.5, '川崎': 37.5, '船橋': 37.0, '小林': 37.0, '浦和': 39.0,
+    '小林坂': 37.0, '園田': 37.5, '美W': 37.0, '栗CW': 37.0, 'CW': 37.0,
+}
+# 1Fは保存済み調教の主な分布（美W/栗CW）に合わせた終い基準。
+CHOKYO_STANDARD_1F = {
+    '大井': 12.5, '川崎': 12.5, '船橋': 12.5, '小林': 12.5, '浦和': 12.8,
+    '小林坂': 12.5, '園田': 12.5, '美W': 12.1, '栗CW': 12.3, 'CW': 12.3,
+}
 
 # ==================================================
 # secrets 読み込み
@@ -1935,11 +2617,10 @@ def _compute_day_chokyo_red(entries):
     """当日生成した全レースを横断し、同一(日付・調教コース・メトリクス)グループ内で
     負荷補正タイム(adj_time)が速い順に順位付け。同一グループ10頭以上の時だけ対象。
     配点は 1位+5/2位+3/3位+2。同タイム(adj_time一致)は同順位=同点(競争順位: 自分より速い頭数+1)。
-    1頭が複数本の追い切りで複数グループの上位に入った時は各グループの点を合算するが、
-    同一セッション(同日・同コース)の1F/3F重複は最良の1つに集約し、合計の上限は +8。
+    1頭が複数本の追い切りで複数グループの上位に入っても、最も高い点の1件だけを採用する。
     entries: [{r_num, umaban, key, time, adj_time, disp, line}] / key=(date,(course,is_main),metric)
     Returns: {(r_num, umaban): {"rank": best_rank, "total": group_size, "line", "disp",
-                                "time", "metric", "points": 合算後(最大8)の加点}}"""
+                                "time", "metric", "points": 全体順位点(最大5)}}"""
     groups = {}
     for e in entries or []:
         if e.get("key") is None or e.get("time") is None:
@@ -1949,14 +2630,22 @@ def _compute_day_chokyo_red(entries):
     def _adj(e):
         return float(e.get("adj_time", e["time"]))
 
-    # 馬ごと: セッション(日付・コース)単位で最良ポイントの1件だけ残す(1F/3F重複の二重計上を防ぐ)。
-    # session_key = key[:2] = (date, (course, is_main))。
-    horse_sessions = {}  # (r_num, umaban) -> {session_key: (points, info)}
+    # 同一グループに同じ馬の同メトリクスが複数ある場合は、最速の1本だけに集約する。
+    horse_candidates = {}  # (r_num, umaban) -> [(points, info)]
     for key, grp in groups.items():
+        deduped = {}
+        for e in grp:
+            horse_key = (int(e["r_num"]), str(e["umaban"]))
+            prev = deduped.get(horse_key)
+            if prev is None or _adj(e) < _adj(prev):
+                deduped[horse_key] = e
+        grp = list(deduped.values())
         group_size = len(grp)
-        if group_size < CHOKYO_TOP_MIN_GROUP_SIZE:
+        # 「全体」は少なくとも2レースを横断した時だけ成立させる。
+        # 1レースだけの生成では、後段のレース内TOP3だけを適用する。
+        race_count = len({int(e["r_num"]) for e in grp})
+        if group_size < CHOKYO_TOP_MIN_GROUP_SIZE or race_count < 2:
             continue
-        session_key = key[:2]
         for e in grp:
             # 競争順位(同タイム=同順位): 自分より adj_time が小さい(速い)頭数 + 1。
             rank = 1 + sum(1 for o in grp if _adj(o) < _adj(e))
@@ -1972,20 +2661,99 @@ def _compute_day_chokyo_red(entries):
                 "time": e.get("time"),
                 "metric": e.get("metric"),
             }
-            sess = horse_sessions.setdefault(k, {})
-            prev = sess.get(session_key)
-            if prev is None or pts > prev[0]:
-                sess[session_key] = (pts, info)
+            horse_candidates.setdefault(k, []).append((pts, info))
 
     red = {}
-    for k, sess in horse_sessions.items():
-        total_points = min(CHOKYO_TOP_BONUS_CAP, sum(p for p, _ in sess.values()))
-        # 表示(N位/M頭)は最上位(rankが最小)のセッションを採用。
-        best_info = min((info for _, info in sess.values()), key=lambda i: int(i["rank"]))
+    for k, candidates in horse_candidates.items():
+        # 点が高い順、同点なら順位・負荷補正タイムが良い順。
+        total_points, best_info = min(
+            candidates,
+            key=lambda x: (-int(x[0]), int(x[1]["rank"]), float(x[1].get("time") or 999)),
+        )
         out = dict(best_info)
         out["points"] = total_points
+        out["global_points"] = total_points
         red[k] = out
     return red
+
+
+def _chokyo_standard_margin(entry):
+    """レース内比較用に、負荷補正タイムが基準より何秒上下かを返す。小さいほど優秀。"""
+    key = entry.get("key")
+    if not key or len(key) < 3:
+        return None
+    _date, course_key, metric = key
+    try:
+        course, is_main = course_key
+    except (TypeError, ValueError):
+        return None
+    standards = CHOKYO_STANDARD_1F if metric == "1F" else CHOKYO_STANDARD_3F if metric == "3F" else {}
+    threshold = standards.get(course)
+    if threshold is None:
+        return None
+    if metric == "3F":
+        threshold = _training_threshold(standards, course, bool(is_main))
+    try:
+        return float(entry.get("adj_time", entry.get("time"))) - float(threshold)
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_race_chokyo_bonus(entries):
+    """各レースの比較可能馬を基準タイム差で並べ、5頭以上なら上位3頭へ+3/+2/+1。
+
+    1頭に複数本・複数メトリクスがある場合は、その馬が基準を最も大きく上回った1本だけを採用する。
+    Returns: {(r_num, umaban): {rank,total,points,margin,disp,line,metric}}
+    """
+    race_horses = {}
+    for e in entries or []:
+        if (e.get("label") or "今走調教") != "今走調教":
+            continue
+        margin = _chokyo_standard_margin(e)
+        if margin is None:
+            continue
+        k = (int(e["r_num"]), str(e["umaban"]))
+        candidate = dict(e)
+        candidate["margin"] = margin
+        prev = race_horses.get(k)
+        if prev is None or margin < float(prev["margin"]):
+            race_horses[k] = candidate
+
+    by_race = {}
+    for (rn, ub), e in race_horses.items():
+        by_race.setdefault(rn, []).append((ub, e))
+
+    result = {}
+    for rn, grp in by_race.items():
+        total = len(grp)
+        if total < CHOKYO_RACE_MIN_HORSES:
+            continue
+        for ub, e in grp:
+            margin = float(e["margin"])
+            rank = 1 + sum(1 for _other_ub, o in grp if float(o["margin"]) < margin)
+            pts = CHOKYO_RACE_POINTS.get(rank, 0)
+            if pts <= 0:
+                continue
+            result[(rn, ub)] = {
+                "rank": rank,
+                "total": total,
+                "points": pts,
+                "race_points": pts,
+                "margin": margin,
+                "disp": e.get("disp"),
+                "line": e.get("line"),
+                "metric": e.get("metric"),
+                "label": "今走調教",
+            }
+    return result
+
+
+def _combine_chokyo_rank_points(global_points, race_points):
+    """全体順位点とレース内順位点を合算し、順位ボーナス全体を最大8点に収める。"""
+    return min(
+        CHOKYO_RANK_BONUS_CAP,
+        max(0, int(global_points or 0)) + max(0, int(race_points or 0)),
+    )
 
 
 def _compute_day_chokyo_ranks(entries):
@@ -2134,8 +2902,8 @@ def _merge_chokyo_rank_infos(red_here=None, rank_here=None):
 
 
 def _rebuild_race_with_chokyo(p, red_here, rank_here=None):
-    """調教上位(赤字)加点を反映して、1レース分の grades/評価一覧/出走馬分析/HTML/テキストを再生成する。
-    ループ内の確定処理と同じ順序を踏む（scored_data には score_chokyo_top / chokyo_red_rank が設定済み）。"""
+    """調教順位加点を反映して、1レース分の grades/評価一覧/出走馬分析/HTML/テキストを再生成する。
+    ループ内の確定処理と同じ順序を踏む（scored_data には全体/レース内順位点が設定済み）。"""
     horses = p["horses"]
     scored_data = p["scored_data"]
     pace_text = p["pace_text"]
@@ -2175,6 +2943,7 @@ def _rebuild_race_with_chokyo(p, red_here, rank_here=None):
     final_html = generate_html_output(
         p["year"], p["month"], p["day"], p["place_name"], p["r_num"], p["header1"],
         pace_text, eval_list_text, match_txt, ai_out_clean, p["details_text"], p["index_table_html"],
+        build_speed_index_table(horses, scored_data),
     )
     final_text = (
         f"📅 {p['year']}/{p['month']}/{p['day']} {p['place_name']}{p['r_num']}R\n\n"
@@ -2241,8 +3010,10 @@ def _parse_chokyo_entries_for_ranking(line, allowed_labels=("今走調教", "前
     if not course:
         return []
 
+    # ' / ' 以降は併せ相手の情報なので、本馬の時計だけを拾う。
+    self_part = str(line).split(' / ', 1)[0]
     nums = []
-    for s in re.findall(r'(\d{1,3}\.\d)', line):
+    for s in re.findall(r'(\d{1,3}\.\d)', self_part):
         try:
             nums.append(float(s))
         except ValueError:
@@ -2282,6 +3053,71 @@ def _parse_chokyo_entries_for_ranking(line, allowed_labels=("今走調教", "前
             "label": label,
         })
     return out
+
+
+def _compute_prev_chokyo_comparison(prev_lines, current_lines):
+    """同じ馬の前走/今走調教を同コース・同メトリクスで対応比較する。
+
+    各条件では最後に記載された調教を採用し、3Fの対応比較を優先、なければ1Fを使う。
+    比較には負荷補正後タイムを使う。
+    """
+    def _latest_by_condition(lines, label):
+        latest = {}
+        for idx, raw in enumerate(lines or []):
+            full_line = f"{label}：{raw}"
+            for e in _parse_chokyo_entries_for_ranking(full_line, allowed_labels=(label,)):
+                key = (e.get("course_key"), e.get("metric"))
+                item = dict(e)
+                item["line_index"] = idx
+                latest[key] = item
+        return latest
+
+    prev_map = _latest_by_condition(prev_lines, "前走調教")
+    current_map = _latest_by_condition(current_lines, "今走調教")
+    shared = set(prev_map) & set(current_map)
+    if not shared:
+        return {"points": 0, "detail": "", "flag": "", "delta": None}
+
+    # 今走側で最後に出た条件を優先し、同じ行に1F/3Fがあれば3Fを採用する。
+    selected_key = max(
+        shared,
+        key=lambda k: (
+            int(current_map[k].get("line_index", -1)),
+            1 if k[1] == "3F" else 0,
+            int(prev_map[k].get("line_index", -1)),
+        ),
+    )
+    prev_e = prev_map[selected_key]
+    current_e = current_map[selected_key]
+    delta = round(
+        float(current_e.get("adj_time", current_e["time"]))
+        - float(prev_e.get("adj_time", prev_e["time"])),
+        3,
+    )
+
+    if delta <= -0.5:
+        points, flag = 5, "【前回比大幅更新】"
+    elif delta <= -0.2:
+        points, flag = 3, "【前回比更新】"
+    elif -0.1 <= delta <= 0.1:
+        points, flag = 1, ""
+    elif delta >= 0.6:
+        points, flag = -3, "【調教下落】"
+    else:
+        points, flag = 0, ""
+
+    course = selected_key[0][0]
+    metric = selected_key[1]
+    signed_delta = f"{delta:+.1f}秒"
+    detail = f"{course}{metric} {signed_delta}"
+    return {
+        "points": points,
+        "detail": detail,
+        "flag": flag,
+        "delta": delta,
+        "metric": metric,
+        "course": course,
+    }
 
 
 def _parse_training_line_full(line):
@@ -4261,6 +5097,14 @@ def calculate_relative_scores(horses_data, current_course, current_dist, r_num):
             for h in to_revert:
                 all_tiers[h] = None
 
+    # 上位tierとの馬対馬比較に反する二軍/三軍を救済する。
+    # 所属変更後は、そのtierの既存配点を相対点にも適用する。
+    matchup_tier_promotions = {}
+    if _REL_MATCHUP_TIER_CONSISTENCY:
+        all_tiers, matchup_tier_promotions = _apply_matchup_tier_consistency(
+            all_tiers, matchup_matrix, matchup_source
+        )
+
     # 優劣記号は > / < / = のみ。大差専用の追加ロックは使わない。
     strong_comparison_locks = []
     strong_rank_notes = {}
@@ -4479,6 +5323,7 @@ def calculate_relative_scores(horses_data, current_course, current_dist, r_num):
             "strong_comparison_locks": list(strong_comparison_locks),
             "strong_rank_notes": dict(strong_rank_notes),
             "tiers_by_name": dict(all_tiers),
+            "matchup_tier_promotions": dict(matchup_tier_promotions),
             "umaban_to_name": dict(umaban_to_name),
             "current_list": list(current_list),
             "pair_net": {u: {v: _slim_entries(es) for v, es in dd.items()}
@@ -5125,10 +5970,7 @@ def _build_relative_html(G, all_scores, all_tiers, umaban_to_name, name_to_umaba
 # ==================================================
 def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dist, is_young, race_class_str, r_num, pace_speed_list=None, is_newcomer=False):
     class_ranks = {'2歳': 0, '3歳': 0, 'C3': 0, 'C2': 1, 'C1': 2, 'B3': 3, 'B2': 4, 'B1': 5, 'A2': 6, 'A1': 7}
-    standard_times = {
-        '大井': 37.5, '川崎': 37.5, '船橋': 37.0, '小林': 37.0, '浦和': 39.0,
-        '小林坂': 37.0, '園田': 37.5, '美W': 37.0, '栗CW': 37.0, 'CW': 37.0
-    }
+    standard_times = CHOKYO_STANDARD_3F
 
     if is_newcomer:
         relative_scores = {str(u): 0 for u in horses_data.keys()}
@@ -5141,6 +5983,12 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
             horses_data, current_course, current_dist, r_num
         )
 
+    # 競馬場・距離・開催日馬場差を補正した独立の共通実戦速度指数。
+    # 検証段階のため総合点へは足さず、順位と根拠だけを表示する。
+    common_speed_indices = calculate_common_speed_indices(
+        horses_data, current_course=current_course, current_dist=current_dist,
+    )
+
     # 想定隊列の後方20%（floor）に該当する馬番を抽出。地方競馬は前有利のため score_3 から -5 する。
     back_20_set = set()
     if pace_speed_list:
@@ -5152,8 +6000,7 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
                 back_20_set.add(str(sd.get("umaban", "")))
 
     base_rank = class_ranks.get(race_class_str, 1)
-    # 旧「同レース内の追切1位」ボーナスは廃止(④調教は閾値超の一律点＋前回比・併せのみ)。
-    # 当日全レース横断のTOP3(赤字)加点はレース横断の先読みが必要なため配点には含めない。
+    # 全体TOP3とレース内TOP3は全レースの調教素材を集めた後、ループ後段で加点・再描画する。
 
     scored_data = {}
     for umaban, horse_data in horses_data.items():
@@ -5269,6 +6116,8 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
         score_3 = max(0, min(5, score_3))
 
         score_4 = 0
+        score_chokyo_prev = 0
+        chokyo_prev_detail = ""
         zen_lines = re.findall(r'前走調教：([^\n]+)', cyokyo_text)
         kon_lines = re.findall(r'今走調教：([^\n]+)', cyokyo_text)
         is_kakuue_senchaku = False
@@ -5280,38 +6129,12 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
                     zen_chokyo_rank_entries.append(_e)
         
         if zen_lines and kon_lines:
-            clean_zen = re.sub(r'\d{1,2}/\d{1,2}\s+', '', zen_lines[-1])
-            clean_kon = re.sub(r'\d{1,2}/\d{1,2}\s+', '', kon_lines[-1])
-
-            z_times = re.findall(r'\b\d{2}\.\d{1}\b', clean_zen.split('/')[0])
-            k_times = re.findall(r'\b\d{2}\.\d{1}\b', clean_kon.split('/')[0])
-            z_c_norm, z_is_main = _extract_training_course(clean_zen)
-            k_c_norm, k_is_main = _extract_training_course(clean_kon)
-
-            if z_c_norm and k_c_norm and z_c_norm == k_c_norm and z_times and k_times:
-                z_t = _pick_3f_time(z_times)
-                k_t = _pick_3f_time(k_times)
-                if z_t is None or k_t is None:
-                    z_t = k_t = None
-                else:
-                    z_t = _training_judge_time(z_t, z_is_main)
-                    k_t = _training_judge_time(k_t, k_is_main)
-
-                is_z_strong = any(x in clean_zen for x in ["強め", "一杯"])
-                is_k_umanari = "馬なり" in clean_kon
-
-                if z_t is not None and k_t is not None and k_t < z_t:
-                    if is_k_umanari and is_z_strong:
-                        score_4 += 5
-                        flags.append("【前回比更新(馬なり)】")
-                    else:
-                        score_4 += 3
-                        flags.append("【前回比更新】")
-                elif z_t is not None and k_t is not None and k_t > z_t + 0.5:
-                    score_4 -= 3
-                    flags.append("【調教下落】")
-                elif z_t is not None and k_t is not None and k_t <= z_t + 0.5:
-                    score_4 += 1
+            prev_comparison = _compute_prev_chokyo_comparison(zen_lines, kon_lines)
+            score_chokyo_prev = int(prev_comparison.get("points", 0) or 0)
+            chokyo_prev_detail = prev_comparison.get("detail", "")
+            score_4 += score_chokyo_prev
+            if prev_comparison.get("flag"):
+                flags.append(prev_comparison["flag"])
         
         if kon_lines:
             for _line in kon_lines:
@@ -5416,6 +6239,7 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
         raw_score_4 = score_4
         score_5 = relative_scores.get(umaban, 20)
         has_no_relative = (relative_tiers.get(umaban) is None)
+        speed_info = common_speed_indices.get(str(umaban), {})
         # ⑥対戦表(0〜10)は対戦表fetch後に compute_matchup_points で後付けする(初期値0)。
 
         scored_data[umaban] = {
@@ -5423,6 +6247,8 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
             "score_3": score_3,
             "score_4": score_4,
             "score_4_raw": raw_score_4,
+            "score_chokyo_prev": score_chokyo_prev,
+            "chokyo_prev_detail": chokyo_prev_detail,
             "score_5": score_5,
             "score_6": 0,
             "flags": list(dict.fromkeys(flags)),
@@ -5435,7 +6261,19 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
             "chokyo_rank_entries": chokyo_rank_entries,
             "zen_chokyo_rank_entries": zen_chokyo_rank_entries,
             "score_chokyo_top": 0,
+            "score_chokyo_global": 0,
+            "score_chokyo_race": 0,
             "relative_tier": relative_tiers.get(umaban),
+            "common_speed_index": speed_info.get("index"),
+            "common_speed_race_index": speed_info.get("race_index"),
+            "common_speed_same_max": speed_info.get("same_condition_max"),
+            "common_speed_same_runs": speed_info.get("same_condition_runs", 0),
+            "common_speed_same_best_run": speed_info.get("same_condition_best_run"),
+            "common_speed_rank": speed_info.get("rank"),
+            "common_speed_total": speed_info.get("total"),
+            "common_speed_runs": speed_info.get("runs", 0),
+            "common_speed_corrected_runs": speed_info.get("corrected_runs", 0),
+            "common_speed_best_run": speed_info.get("best_run"),
             "has_no_relative": has_no_relative,
             "is_newcomer": is_newcomer,
             "tataki_second": bool(tataki_second),
@@ -5683,7 +6521,7 @@ def _deterministic_total(sc):
     s6 = int(sc.get("score_6", 0) or 0)
     sp = int(sc.get("score_pace", 0) or 0)   # ⑦展開加点(ペース加点＋競馬場×距離の前有利加点)
     spt = int(sc.get("score_pattern", 0) or 0)  # 好走パターン(ユーザーメモ)による±5
-    sct = int(sc.get("score_chokyo_top", 0) or 0)  # 当日各コース調教上位(赤字)への加点
+    sct = int(sc.get("score_chokyo_top", 0) or 0)  # 全体＋レース内の調教順位加点（合計最大8）
     return s2 + s3 + s4 + s5 + s6 + sp + spt + sct
 
 
@@ -5802,14 +6640,61 @@ def format_deterministic_evaluation(horses_data: dict, cyokyo_data: dict, scored
         spt = int(sc.get("score_pattern", 0) or 0)
         pat_disp = f" 好走{'+' if spt > 0 else ''}{spt}" if spt else ""
         sct = int(sc.get("score_chokyo_top", 0) or 0)
-        chokyo_top_disp = f" 調教上位+{sct}" if sct else ""
+        scg = int(sc.get("score_chokyo_global", 0) or 0)
+        scr = int(sc.get("score_chokyo_race", 0) or 0)
+        scprev = int(sc.get("score_chokyo_prev", 0) or 0)
+        prev_detail = sc.get("chokyo_prev_detail", "")
+        prev_parts = []
+        if prev_detail:
+            prev_parts.append(f"前走比{'+' if scprev > 0 else ''}{scprev} {prev_detail}")
+        prev_disp = f"({' / '.join(prev_parts)})" if prev_parts else ""
+        rank_parts = []
+        if scg:
+            global_rank = sc.get("chokyo_red_rank")
+            rank_parts.append(f"全体{global_rank}位+{scg}" if global_rank else f"全体+{scg}")
+        if scr:
+            race_rank = sc.get("chokyo_race_rank")
+            rank_parts.append(f"レース内{race_rank}位+{scr}" if race_rank else f"レース内+{scr}")
+        chokyo_top_disp = ""
+        if sct:
+            rank_detail = f"({'/'.join(rank_parts)})" if rank_parts else ""
+            chokyo_top_disp = f" 調教順位+{sct}{rank_detail}"
         tier = sc.get("relative_tier")
         rel_label = sc.get("no_relative_grade") or (f"相対{_rel_label_display(tier)}" if tier else "相対不明")
+        speed_index = sc.get("common_speed_index")
+        speed_race_index = sc.get("common_speed_race_index")
+        speed_same_max = sc.get("common_speed_same_max")
+        speed_same_runs = int(sc.get("common_speed_same_runs", 0) or 0)
+        speed_rank = sc.get("common_speed_rank")
+        speed_total = sc.get("common_speed_total")
+        speed_runs = int(sc.get("common_speed_runs", 0) or 0)
+        speed_best = sc.get("common_speed_best_run") or {}
+        speed_line = ""
+        if speed_index is not None:
+            rank_note = f" {speed_rank}位/{speed_total}頭" if speed_rank and speed_total else ""
+            variant = float(speed_best.get("variant_per_1000", 0) or 0)
+            variant_note = ""
+            if abs(variant) >= 0.03:
+                variant_note = (
+                    f" / 最良走:{speed_best.get('date', '')}{speed_best.get('place', '')}"
+                    f"{speed_best.get('dist', '')}m {speed_best.get('variant_label', '')}馬場"
+                    f"{abs(variant):.1f}秒/1000m補正"
+                )
+            same_note = f"{float(speed_same_max):.1f}（{speed_same_runs}走）" if speed_same_max is not None else "なし"
+            race_note = f"{float(speed_race_index):.1f}" if speed_race_index is not None else "-"
+            ref_note = speed_best.get('par_source', '')
+            confidence = speed_best.get('reference_confidence', '')
+            ref_disp = f" / {ref_note} 信頼:{confidence}" if ref_note else ""
+            speed_line = (
+                f"【速度指数】今{float(speed_index):.1f}{rank_note} / レース内{race_note}"
+                f" / 同場同距離最高:{same_note}（近走{speed_runs}件）{ref_disp}{variant_note}\n"
+            )
 
         block = f"{circled_num}{horse_name}　{rank}\n"
         block += f"騎:{jockey_disp}　{jockey_stats}\n"
         block += f"【結論:計{total}点】\n"
-        block += f"【内訳】⑤{rel_label}={s5} ④調教{s4} ②騎手{s2} ⑥対戦{s6} ③盛返{s3}{pace_disp}{pat_disp}{chokyo_top_disp}\n"
+        block += f"【内訳】⑤{rel_label}={s5} ④調教{s4}{prev_disp} ②騎手{s2} ⑥対戦{s6} ③盛返{s3}{pace_disp}{pat_disp}{chokyo_top_disp}\n"
+        block += speed_line
         block += f"{flags} 「{comment}」\n" if flags else f"「{comment}」\n"
         block += f"【調教】\n{cyokyo_display}\n"
         block += f"🐎レース内容\n{race_content}\n"
@@ -6045,6 +6930,7 @@ def parse_nankankeiba_detail(html, place_name, resources):
 
                 d_txt = ""
                 place_short = ""
+                source_place = ""
                 d_div = z.select_one("p.nk23_u-d-flex")
                 if d_div:
                     d_raw = d_div.get_text(" ", strip=True)
@@ -6054,16 +6940,33 @@ def parse_nankankeiba_detail(html, place_name, resources):
 
                     for kp in KNOWN_PLACES:
                         if kp in rem_text:
+                            source_place = kp
                             place_short = "JRA" if kp in JRA_PLACES else kp
                             break
                     if not place_short:
                         for k, v in PLACE_MAP.items():
                             if k in rem_text:
+                                source_place = v
                                 place_short = v
                                 break
 
                 if not d_txt: d_txt = "不明"
                 if not place_short: place_short = "不明"
+                if not source_place: source_place = place_short
+
+                # 相対評価では従来どおり中央10場を「JRA」とまとめるが、速度指数では
+                # 東京/中山など実競馬場と芝・ダート・障害を分けて基準時計を作る。
+                if source_place in JRA_PLACES:
+                    if re.search(r'障', z_full_text):
+                        surface = "障"
+                    elif re.search(r'芝', z_full_text):
+                        surface = "芝"
+                    elif re.search(r'ダ(?:ート)?', z_full_text):
+                        surface = "ダ"
+                    else:
+                        surface = ""
+                else:
+                    surface = "ダ"
 
                 dm = re.search(r"(\d{3,4})m?", z_full_text)
                 dist = dm.group(1) if dm else ""
@@ -6159,6 +7062,8 @@ def parse_nankankeiba_detail(html, place_name, resources):
                     "url": past_url,
                     "race_name": race_name,
                     "place": place_short,
+                    "source_place": source_place,
+                    "surface": surface,
                     "dist": dist,
                     "jockey": j_prev_full,
                     "pas": pas,
@@ -8245,7 +9150,7 @@ def build_evaluation_list(grades, horses_data, scored_data=None):
                 rank_note = f"{rk}位/{total}頭" if total else f"{rk}位"
                 d_str = f"({disp} {rank_note})" if disp else f"({rank_note})"
                 item = f"[{u}][[SMALL]]{d_str}[[/SMALL]]"
-                if int(d.get("score_chokyo_top", 0) or 0) > 0:
+                if int(d.get("score_chokyo_global", 0) or 0) > 0:
                     item = f"[[R]]{item}[[/R]]"
                 chokyo_items.append((rk_int, int(u) if str(u).isdigit() else 99, item))
 
@@ -8257,9 +9162,102 @@ def build_evaluation_list(grades, horses_data, scored_data=None):
         if tataki_items:
             eval_text += f"\n叩2： {' '.join(tataki_items)}"
 
+        speed_items = []
+        for u, d in scored_data.items():
+            idx = d.get("common_speed_index")
+            race_idx = d.get("common_speed_race_index")
+            rk = d.get("common_speed_rank")
+            if idx is None or rk is None or int(rk) > 3:
+                continue
+            race_disp = f"/内{float(race_idx):.1f}" if race_idx is not None else ""
+            speed_items.append((int(rk), int(u) if str(u).isdigit() else 99, f"[{u}](今{float(idx):.1f}{race_disp})"))
+        if speed_items:
+            speed_items.sort(key=lambda x: (x[0], x[1]))
+            eval_text += f"\n⚡速度： {' '.join(x[2] for x in speed_items)}"
+
     return eval_text
 
-def generate_html_output(year, month, day, place_name, r_num, header1, pace_text, eval_list_text, match_txt, ai_out_clean, details_text, index_table_html="(相対評価データなし)"):
+
+def build_speed_index_table(horses_data, scored_data):
+    """現在能力・レース内100・同場同距離最高の検証表。総合点には使わない。"""
+    rows = []
+    for umaban, horse in (horses_data or {}).items():
+        sc = (scored_data or {}).get(umaban) or (scored_data or {}).get(str(umaban)) or {}
+        idx = sc.get('common_speed_index')
+        rank = sc.get('common_speed_rank')
+        best = sc.get('common_speed_best_run') or {}
+        rows.append({
+            'umaban': str(umaban),
+            'name': str((horse or {}).get('name') or ''),
+            'index': idx,
+            'race_index': sc.get('common_speed_race_index'),
+            'same_max': sc.get('common_speed_same_max'),
+            'same_runs': int(sc.get('common_speed_same_runs', 0) or 0),
+            'rank': rank,
+            'runs': int(sc.get('common_speed_runs', 0) or 0),
+            'best': best,
+        })
+    rows.sort(key=lambda r: (
+        r['rank'] is None,
+        int(r['rank'] or 999),
+        int(r['umaban']) if r['umaban'].isdigit() else 999,
+    ))
+
+    body = []
+    for row in rows:
+        best = row['best']
+        if best:
+            best_text = (
+                f"{best.get('date', '')} {best.get('place', '')}"
+                f"{best.get('surface', '')}{best.get('dist', '')}m"
+            )
+            if best.get('is_transfer'):
+                adjust_text = f"{best.get('par_source', '転入元基準')}・日別補正なし"
+            else:
+                label = best.get('variant_label', '標準')
+                adjust_text = f"南関{label}補正" if label != '標準' else "南関標準"
+        else:
+            best_text = '比較可能な時計なし'
+            adjust_text = '-'
+        index_text = f"{float(row['index']):.1f}" if row['index'] is not None else '-'
+        race_index_text = f"{float(row['race_index']):.1f}" if row['race_index'] is not None else '-'
+        same_text = (
+            f"{float(row['same_max']):.1f} ({row['same_runs']}走)"
+            if row['same_max'] is not None else '-'
+        )
+        if best:
+            confidence = best.get('reference_confidence', '')
+            samples = int(best.get('reference_samples', 0) or 0)
+            adjust_text += f"・信頼{confidence}" if confidence else ''
+            adjust_text += f"・{samples}件" if samples else ''
+        rank_text = str(row['rank']) if row['rank'] is not None else '-'
+        mark = (
+            f'<span class="mark-btn" data-uma="{html.escape(row["umaban"])}" '
+            f'data-mark="" onclick="cycleMark(this)"></span>'
+        )
+        body.append(
+            '<tr>'
+            f'<td>{html.escape(rank_text)}</td>'
+            f'<td class="speed-horse">{mark}[{html.escape(row["umaban"])}] {html.escape(row["name"])}</td>'
+            f'<td class="speed-value">{html.escape(index_text)}</td>'
+            f'<td class="speed-race-value">{html.escape(race_index_text)}</td>'
+            f'<td>{html.escape(same_text)}</td>'
+            f'<td>{row["runs"]}</td>'
+            f'<td><small>{html.escape(best_text)}</small></td>'
+            f'<td><small>{html.escape(adjust_text)}</small></td>'
+            '</tr>'
+        )
+    return (
+        '<div class="speed-index-note">今の指数は平均級70・レコード級100。レース内は最高馬を100に換算。'
+        '同場同距離最高は取得済み近走内の自己最高です。総合点には加算しません。'
+        'JRA・他地方は日別補正なしで、競馬場・芝ダート・距離別基準を使います。</div>'
+        '<div class="table-wrap"><table class="speed-index-table">'
+        '<thead><tr><th>順位</th><th>馬</th><th>今の指数</th><th>レース内</th>'
+        '<th>同場同距離最高</th><th>近走</th><th>最良走</th><th>基準・補正</th></tr></thead>'
+        f'<tbody>{"".join(body)}</tbody></table></div>'
+    )
+
+def generate_html_output(year, month, day, place_name, r_num, header1, pace_text, eval_list_text, match_txt, ai_out_clean, details_text, index_table_html="(相対評価データなし)", speed_index_html="(指数データなし)"):
     
     def format_rank_text(text):
         t = html.escape(text)
@@ -8411,6 +9409,13 @@ def generate_html_output(year, month, day, place_name, r_num, header1, pace_text
         .tab-content {{ display: none; padding: 10px; }}
         .tab-content.active {{ display: block; }}
         .content-box {{ background: var(--box-bg); padding: 12px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 15px; overflow-x: auto; }}
+        .speed-index-note {{ margin: 0 0 10px; color: #667085; font-size: 0.82em; line-height: 1.45; }}
+        .speed-index-table {{ width: 100%; min-width: 900px; border-collapse: collapse; font-size: 0.9em; }}
+        .speed-index-table th, .speed-index-table td {{ padding: 7px 6px; border-bottom: 1px solid var(--border); text-align: center; white-space: nowrap; }}
+        .speed-index-table th {{ background: #f5f7fa; color: #667085; }}
+        .speed-index-table .speed-horse {{ text-align: left; font-weight: bold; }}
+        .speed-index-table .speed-value {{ color: #b42318; font-size: 1.15em; font-weight: bold; font-variant-numeric: tabular-nums; }}
+        .speed-index-table .speed-race-value {{ color: #175cd3; font-weight: bold; font-variant-numeric: tabular-nums; }}
         pre {{ white-space: pre-wrap; font-family: inherit; margin: 0; font-size: 0.95em; }}
         .pace-stable-note {{ display: block; font-size: 0.78em; color: #667085; line-height: 1.35; margin: 0 0 2px 1.6em; }}
         
@@ -8462,6 +9467,7 @@ def generate_html_output(year, month, day, place_name, r_num, header1, pace_text
         <div class="eval-bar">{format_rank_text(eval_list_text.replace(chr(10), "　")).replace('[[R]]', '<span class="chokyo-red">').replace('[[/R]]', '</span>').replace('[[SMALL]]', '<small class="chokyo-detail">').replace('[[/SMALL]]', '</small>')}</div>
         <div class="tabs">
             <button class="tab-button active" onclick="openTab(event, 'tab-pace')">展開</button>
+            <button class="tab-button" onclick="openTab(event, 'tab-speed-index')">指数</button>
             <button class="tab-button" onclick="openTab(event, 'tab-index')">相対評価</button>
             <button class="tab-button" onclick="openTab(event, 'tab-ai')">出走馬分析</button>
             <button class="tab-button" onclick="openTab(event, 'tab-match')">対戦表</button>
@@ -8469,6 +9475,7 @@ def generate_html_output(year, month, day, place_name, r_num, header1, pace_text
     </div>
 
     <div id="tab-pace" class="tab-content active"><div class="content-box"><pre>{pace_text_html}</pre></div></div>
+    <div id="tab-speed-index" class="tab-content"><div class="content-box">{speed_index_html}</div></div>
     <div id="tab-index" class="tab-content"><div class="content-box" style="overflow-x: auto;">{index_table_html}</div></div>
     <div id="tab-ai" class="tab-content"><div class="content-box"><div style="white-space:pre-wrap;font-family:inherit;margin:0;font-size:0.95em;line-height:1.5;">{format_detailed_text(ai_out_clean)}</div></div></div>
     <div id="tab-match" class="tab-content"><div class="content-box"><pre>{match_txt_html}</pre></div></div>
@@ -9042,7 +10049,7 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
         r_nums = sorted(set(r_nums)) or list(range(1, 13))
 
         os.makedirs("cache", exist_ok=True)
-        day_chokyo = []          # 当日各コース横断の今走調教ランキング素材 [{r_num,umaban,key,time}]
+        day_chokyo = []          # 全体TOP3・レース内TOP3の今走調教ランキング素材
         day_chokyo_display = []  # 表示用: 今走/前走調教の同日順位素材
         day_chokyo_pending = {}  # r_num -> 再採点・再描画用の素材一式
         for r_num in r_nums:
@@ -9384,7 +10391,11 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                     f"{details_text}"
                 )
 
-                final_html = generate_html_output(year, month, day, place_name, r_num, header1, pace_text, eval_list_text, match_txt, ai_out_clean, details_text, index_table_html)
+                final_html = generate_html_output(
+                    year, month, day, place_name, r_num, header1, pace_text, eval_list_text,
+                    match_txt, ai_out_clean, details_text, index_table_html,
+                    build_speed_index_table(nk_data["horses"], scored_data),
+                )
 
                 # 馬名→uma_id（メモを別レースに引き継ぐためのキー）
                 uma_ids_map = {
@@ -9438,13 +10449,15 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
             except Exception as e:
                 yield {"type": "error", "data": f"{r_num}R Error: {e}"}
 
-        # === 当日各コース横断の調教上位(赤字＋加点)を確定 → 該当レースを再採点・再描画して上書き ===
+        # === 全体TOP3＋レース内TOP3を確定 → 該当レースを再採点・再描画して上書き ===
         # 失敗しても try で握りつぶし、ループ内で出した暫定結果(現行どおり)をそのまま残す。
         try:
             red_ranks = _compute_day_chokyo_red(day_chokyo)
+            race_ranks = _compute_race_chokyo_bonus(day_chokyo)
             display_ranks = _compute_day_chokyo_ranks(day_chokyo_display)
             affected = sorted(
                 {rn for (rn, _ub) in red_ranks}
+                | {rn for (rn, _ub) in race_ranks}
                 | {rn for (rn, _ub, _label, _line) in display_ranks}
             )
             if affected:
@@ -9457,8 +10470,13 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                         if not p:
                             continue
                         red_here = {ub: info for (r2, ub), info in red_ranks.items() if r2 == rn}
+                        race_here = {ub: info for (r2, ub), info in race_ranks.items() if r2 == rn}
                         rank_here = _rank_infos_for_race(display_ranks, rn)
                         merged_rank_here = _merge_chokyo_rank_infos(red_here, rank_here)
+                        for sd in p["scored_data"].values():
+                            sd["score_chokyo_global"] = 0
+                            sd["score_chokyo_race"] = 0
+                            sd["score_chokyo_top"] = 0
                         for ub, infos in merged_rank_here.items():
                             sd = p["scored_data"].get(ub) or p["scored_data"].get(str(ub))
                             if sd is not None:
@@ -9485,11 +10503,23 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                                             sd["chokyo_display_disp"] = info.get("disp")
                                     pts = int(info.get("points", 0) or 0)
                                     if pts > 0:
-                                        sd["score_chokyo_top"] = pts
+                                        sd["score_chokyo_global"] = pts
                                         sd["chokyo_red_rank"] = rk
                                         sd["chokyo_red_total"] = total
                                         if info.get("disp"):
                                             sd["chokyo_rank_disp"] = info.get("disp")
+                        for ub, info in race_here.items():
+                            sd = p["scored_data"].get(ub) or p["scored_data"].get(str(ub))
+                            if sd is None:
+                                continue
+                            sd["score_chokyo_race"] = int(info.get("points", 0) or 0)
+                            sd["chokyo_race_rank"] = info.get("rank")
+                            sd["chokyo_race_total"] = info.get("total")
+                            sd["chokyo_race_disp"] = info.get("disp")
+                        for sd in p["scored_data"].values():
+                            global_pts = int(sd.get("score_chokyo_global", 0) or 0)
+                            race_pts = int(sd.get("score_chokyo_race", 0) or 0)
+                            sd["score_chokyo_top"] = _combine_chokyo_rank_points(global_pts, race_pts)
                         rb = _rebuild_race_with_chokyo(p, red_here, rank_here)
                         uma_ids_map = {h.get("name"): h.get("uma_id", "") for h in p["horses"].values() if h.get("name")}
                         try:
@@ -9522,7 +10552,7 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                         print(f"  [調教上位] {rn}R 再描画スキップ: {_ern}")
                         traceback.print_exc()
                 if applied_races:
-                    yield {"type": "status", "data": f"🏇 当日各コースの調教順位を{applied_races}レースに反映しました"}
+                    yield {"type": "status", "data": f"🏇 全体・レース内の調教順位を{applied_races}レースに反映しました"}
         except Exception as _e:
             print(f"  [調教上位] 反映スキップ: {_e}")
 

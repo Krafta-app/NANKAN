@@ -454,6 +454,7 @@ select {
 
 .tabs {
   display: flex;
+  overflow-x: auto;
   gap: 4px;
   padding: 8px;
   border-bottom: 1px solid var(--line);
@@ -487,6 +488,62 @@ select {
 
 .tab-panel.active {
   display: block;
+}
+
+#panelSpeed .speed-index-note {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+#panelSpeed .table-wrap {
+  overflow-x: auto;
+}
+
+#panelSpeed .speed-index-table {
+  width: 100%;
+  min-width: 900px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+#panelSpeed .speed-index-table th,
+#panelSpeed .speed-index-table td {
+  padding: 8px 7px;
+  border-bottom: 1px solid var(--line);
+  text-align: center;
+  white-space: nowrap;
+}
+
+#panelSpeed .speed-index-table th {
+  color: var(--muted);
+  background: #f8faf5;
+  font-size: 11px;
+}
+
+#panelSpeed .speed-index-table .speed-horse {
+  text-align: left;
+  font-weight: 800;
+}
+
+#panelSpeed .speed-index-table .speed-value {
+  color: #b42318;
+  font-size: 16px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+#panelSpeed .speed-index-table .speed-race-value {
+  color: #175cd3;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+#panelSpeed .speed-index-table .speed-result-hit {
+  color: var(--green);
+  background: var(--green-2);
+  font-weight: 900;
 }
 
 .prediction-viewer {

@@ -32,6 +32,7 @@ const PLACE_FALLBACK = { "10": "大井", "11": "川崎", "12": "船橋", "13": "
 const TAB_PANELS = {
   pace: "panelPace",
   odds: "panelOdds",
+  speed: "panelSpeed",
   index: "panelIndex",
   ai: "panelAi",
   match: "panelMatch",
@@ -50,7 +51,7 @@ function cacheElements() {
     "statusLine", "pinBox", "pinInput", "refreshButton",
     "dateSelect", "placeSelect", "raceRail", "raceSummary",
     "listView", "raceView", "backToList", "raceViewTitle", "prevRace", "nextRace", "sortByRace", "sortByConf",
-    "panelPace", "panelOdds", "panelIndex", "panelAi", "panelMatch", "panelMemo",
+    "panelPace", "panelOdds", "panelSpeed", "panelIndex", "panelAi", "panelMatch", "panelMemo",
   ]) {
     els[id] = document.getElementById(id);
   }
@@ -310,7 +311,7 @@ async function loadRace(raceKey) {
 }
 
 async function ensureFullRaceForActiveTab() {
-  if (!["pace", "index", "ai", "match"].includes(state.activeTab)) return;
+  if (!["pace", "speed", "index", "ai", "match"].includes(state.activeTab)) return;
   await ensureFullRace();
 }
 
@@ -335,12 +336,13 @@ async function ensureFullRace() {
 
 function renderHeavyPanelsLoading() {
   for (const [tab, id] of Object.entries(TAB_PANELS)) {
-    if (["pace", "index", "ai", "match"].includes(tab)) renderLoading(els[id], "詳細を読み込み中");
+    if (["pace", "speed", "index", "ai", "match"].includes(tab)) renderLoading(els[id], "詳細を読み込み中");
   }
 }
 
 function renderHeavyPanelsError(message) {
   renderEmpty(els.panelPace, "展開を取得できません", message);
+  renderEmpty(els.panelSpeed, "指数を取得できません", message);
   renderEmpty(els.panelIndex, "相対評価を取得できません", message);
   renderEmpty(els.panelAi, "出走馬分析を取得できません", message);
   renderEmpty(els.panelMatch, "対戦表を取得できません", message);
@@ -356,7 +358,7 @@ function parsePrediction(detail) {
   const result = {
     evalText: race.eval_list_text || "",
     evalGradeByUma: evalGradesByUma(race.eval_list_text || ""),
-    paceEl: null, indexEl: null, aiEl: null, matchEl: null,
+    paceEl: null, speedEl: null, indexEl: null, aiEl: null, matchEl: null,
     umaMap: {},          // umaban -> { name, uma_id, noteText }
     notedUmaban: new Set(),
     markCtx: { markPrefix: `${race.date || ""}_${race.place_name || ""}_`, raceNum: String(race.race_num || "") },
@@ -365,6 +367,7 @@ function parsePrediction(detail) {
 
   const doc = new DOMParser().parseFromString(html, "text/html");
   result.paceEl = doc.querySelector("#tab-pace");
+  result.speedEl = doc.querySelector("#tab-speed-index");
   result.indexEl = doc.querySelector("#tab-index");
   result.aiEl = doc.querySelector("#tab-ai");
   result.matchEl = doc.querySelector("#tab-match");
@@ -729,10 +732,36 @@ function renderAllPanels() {
   renderEval();
   renderSection(els.panelPace, state.parsed?.paceEl, "展開");
   renderOdds();
+  renderSpeed();
   renderSection(els.panelIndex, state.parsed?.indexEl, "相対評価");
   renderAi();
   renderSection(els.panelMatch, state.parsed?.matchEl, "対戦表");
   renderMemo();
+}
+
+// 指数は予想時点の値を保持し、結果取得後だけ実着順を右端へ足して検証しやすくする。
+function renderSpeed() {
+  const panel = els.panelSpeed;
+  renderSection(panel, state.parsed?.speedEl, "指数");
+  const table = panel?.querySelector(".speed-index-table");
+  if (!table) return;
+  const head = table.querySelector("thead tr");
+  if (head) {
+    const th = document.createElement("th");
+    th.textContent = "結果";
+    head.appendChild(th);
+  }
+  const horses = state.raceDetail?.horses || [];
+  for (const row of table.querySelectorAll("tbody tr")) {
+    const umaMatch = (row.textContent || "").match(/\[(\d{1,2})\]/);
+    const umaban = umaMatch ? Number(umaMatch[1]) : 0;
+    const horse = horses.find((item) => Number(item.umaban || 0) === umaban);
+    const td = document.createElement("td");
+    const finish = Number(horse?.finish_rank || 0);
+    td.textContent = finish > 0 ? `${finish}着` : "-";
+    if (finish > 0 && finish <= 3) td.className = "speed-result-hit";
+    row.appendChild(td);
+  }
 }
 
 // 南関公式の単勝・複勝オッズをサーバー関数(/api/odds)経由で取得。人気は単勝昇順で導出。
@@ -1393,7 +1422,7 @@ function renderSetupState() {
   els.raceRail.replaceChildren();
   renderEmpty(els.raceSummary, "未設定", "SUPABASE_URL と SUPABASE_SERVICE_ROLE_KEY を入れてください。");
   renderEmpty(els.panelPace, "接続待ち", "VercelのEnvironment Variables設定後、再デプロイすると表示されます。");
-  for (const id of ["panelIndex", "panelAi", "panelMatch", "panelMemo"]) {
+  for (const id of ["panelSpeed", "panelIndex", "panelAi", "panelMatch", "panelMemo"]) {
     renderEmpty(els[id], "接続待ち", "Supabase接続後に表示されます。");
   }
 }
@@ -1563,6 +1592,13 @@ function demoHtml(race) {
       <div class="tabs"></div>
     </div>
     <div id="tab-pace" class="tab-content"><div class="content-box"><pre>【展開予想】\nハナは[1]サンプルスター。番手に[3]。\nMペース想定。</pre></div></div>
+    <div id="tab-speed-index" class="tab-content"><div class="content-box">
+      <div class="speed-index-note">今の指数は平均級70・レコード級100。レース内は最高馬を100に換算。同場同距離最高も併記します。</div>
+      <div class="table-wrap"><table class="speed-index-table"><thead><tr><th>順位</th><th>馬</th><th>今の指数</th><th>レース内</th><th>同場同距離最高</th><th>近走</th><th>最良走</th><th>基準・補正</th></tr></thead><tbody>
+        <tr><td>1</td><td class="speed-horse">[1] サンプルスター</td><td class="speed-value">86.4</td><td class="speed-race-value">100.0</td><td>91.2 (2走)</td><td>5</td><td>川崎ダ1400m</td><td>川崎ダ1400m基準・信頼高</td></tr>
+        <tr><td>2</td><td class="speed-horse">[3] カワサキロード</td><td class="speed-value">82.8</td><td class="speed-race-value">96.4</td><td>-</td><td>5</td><td>東京ダ1400m</td><td>東京ダ1400m基準・日別補正なし</td></tr>
+      </tbody></table></div>
+    </div></div>
     <div id="tab-index" class="tab-content"><div class="content-box">相対評価テーブル（デモ）</div></div>
     <div id="tab-ai" class="tab-content"><div class="content-box"><div>
       <div class="horse-header"><span class="mark-btn" data-uma="1"></span><span>①サンプルスター　S</span></div>
