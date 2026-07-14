@@ -534,6 +534,19 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
+#panelSpeed .speed-index-table .speed-draw-basis {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.25;
+}
+
+#panelSpeed .speed-index-table .speed-top3 {
+  font-weight: 900;
+}
+
 #panelSpeed .speed-index-table .speed-result-hit {
   color: var(--green);
   background: var(--green-2);

@@ -6,6 +6,10 @@ vercel_site/.vercel/
 
 # ローカル専用データ（クラウドはSupabaseを使う）
 data/
+# 公開統計から生成したJRAコース基準だけは、予測時の固定参照として共有する。
+!data/
+data/*
+!data/jra_course_db_times.json
 cache/
 logs/
 *.db

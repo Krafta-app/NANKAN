@@ -745,19 +745,57 @@ function renderSpeed() {
   renderSection(panel, state.parsed?.speedEl, "指数");
   const table = panel?.querySelector(".speed-index-table");
   if (!table) return;
-  // 保存済みHTMLが旧3指数表示でも、閲覧時は「指数」「同場同距離」の2指数に統一する。
-  const headers = Array.from(table.querySelectorAll("thead th"));
+  // 保存済みHTMLも新しい「指数・最高指数・コース指数」の並びへ揃える。
+  let headers = Array.from(table.querySelectorAll("thead th"));
   const raceIndexColumn = headers.findIndex((th) => (th.textContent || "").trim() === "レース内");
   if (raceIndexColumn >= 0) {
     for (const row of table.querySelectorAll("tr")) {
       row.children[raceIndexColumn]?.remove();
     }
   }
+  headers = Array.from(table.querySelectorAll("thead th"));
   for (const th of table.querySelectorAll("thead th")) {
     const label = (th.textContent || "").trim();
     if (label === "今の指数") th.textContent = "指数";
-    if (label === "同場同距離最高") th.textContent = "同場同距離";
+    if (["同場同距離最高", "同場同距離"].includes(label)) th.textContent = "コース指数";
+    if (label === "近走") th.textContent = "取得走";
+    if (label === "最良走") th.textContent = "最高指数の走り";
   }
+  headers = Array.from(table.querySelectorAll("thead th"));
+  if (!headers.some((th) => (th.textContent || "").trim() === "最高指数")) {
+    const courseColumn = headers.findIndex((th) => (th.textContent || "").trim() === "コース指数");
+    const insertAt = courseColumn >= 0 ? courseColumn : 3;
+    for (const row of table.querySelectorAll("tr")) {
+      const cell = document.createElement(row.closest("thead") ? "th" : "td");
+      cell.textContent = row.closest("thead") ? "最高指数" : "-";
+      row.insertBefore(cell, row.children[insertAt] || null);
+    }
+  }
+  headers = Array.from(table.querySelectorAll("thead th"));
+
+  // 指数欄は今回採用する枠側だけを表示し、反対側の数値は保存済みHTMLでも隠す。
+  for (const basis of table.querySelectorAll("tbody .speed-draw-basis")) {
+    const side = (basis.textContent || "").match(/今回(?:の)?(内|外)側/);
+    basis.textContent = side ? `今回${side[1]}側` : "今回枠側";
+  }
+
+  // 最高指数とコース指数は独立して上位3頭を太字にする。
+  const markTop3 = (label) => {
+    const column = headers.findIndex((th) => (th.textContent || "").trim() === label);
+    if (column < 0) return;
+    const values = Array.from(table.querySelectorAll("tbody tr"))
+      .map((row, order) => {
+        const cell = row.children[column];
+        const match = (cell?.textContent || "").match(/-?\d+(?:\.\d+)?/);
+        return { cell, order, value: match ? Number(match[0]) : Number.NaN };
+      })
+      .filter((item) => item.cell && Number.isFinite(item.value))
+      .sort((a, b) => (b.value - a.value) || (a.order - b.order));
+    for (const item of values.slice(0, 3)) item.cell.classList.add("speed-top3");
+  };
+  markTop3("最高指数");
+  markTop3("コース指数");
+
   const head = table.querySelector("thead tr");
   if (head) {
     const th = document.createElement("th");
@@ -1606,10 +1644,10 @@ function demoHtml(race) {
     </div>
     <div id="tab-pace" class="tab-content"><div class="content-box"><pre>【展開予想】\nハナは[1]サンプルスター。番手に[3]。\nMペース想定。</pre></div></div>
     <div id="tab-speed-index" class="tab-content"><div class="content-box">
-      <div class="speed-index-note">指数は平均級70・レコード級100。同場同距離は取得済み近走内の自己最高です。</div>
-      <div class="table-wrap"><table class="speed-index-table"><thead><tr><th>順位</th><th>馬</th><th>指数</th><th>同場同距離</th><th>近走</th><th>最良走</th><th>基準・補正</th></tr></thead><tbody>
-        <tr><td>1</td><td class="speed-horse">[1] サンプルスター</td><td class="speed-value">86.4</td><td>91.2 (2走)</td><td>5</td><td>川崎ダ1400m</td><td>川崎ダ1400m基準・信頼高</td></tr>
-        <tr><td>2</td><td class="speed-horse">[3] カワサキロード</td><td class="speed-value">82.8</td><td>-</td><td>5</td><td>東京ダ1400m</td><td>東京ダ1400m基準・日別補正なし</td></tr>
+      <div class="speed-index-note">指数は今回枠側の値だけを表示します。最高指数・コース指数はそれぞれ上位3頭を太字にします。</div>
+      <div class="table-wrap"><table class="speed-index-table"><thead><tr><th>順位</th><th>馬</th><th>指数</th><th>最高指数</th><th>コース指数</th><th>取得走</th><th>最高指数の走り</th><th>基準・補正</th></tr></thead><tbody>
+        <tr><td>1</td><td class="speed-horse">[1] サンプルスター</td><td class="speed-value">86.4<small class="speed-draw-basis">今回内側</small></td><td class="speed-top3">91.2</td><td class="speed-top3">88.3 (2走)</td><td>5</td><td>川崎ダ1400m</td><td>川崎ダ1400m基準・信頼高</td></tr>
+        <tr><td>2</td><td class="speed-horse">[3] カワサキロード</td><td class="speed-value">82.8<small class="speed-draw-basis">今回外側</small></td><td class="speed-top3">89.0</td><td>-</td><td>5</td><td>東京ダ1400m</td><td>東京ダ1400m基準・日別補正なし</td></tr>
       </tbody></table></div>
     </div></div>
     <div id="tab-index" class="tab-content"><div class="content-box">相対評価テーブル（デモ）</div></div>

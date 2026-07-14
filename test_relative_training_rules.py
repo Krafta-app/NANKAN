@@ -106,6 +106,43 @@ class CommonSpeedIndexTests(unittest.TestCase):
         self.assertEqual(result["1"]["best_run"]["variant_per_1000"], 0.0)
         self.assertTrue(result["1"]["best_run"]["is_transfer"])
 
+    def test_jra_marked_exchange_horse_gets_level_bonus(self):
+        shared_run = {
+            "time": 91.0, "dist": "1400", "place": "川崎", "date": "26.6.5", "url": "",
+        }
+        horses = {
+            "1": {"name": "[J]中央馬", "hist": [dict(shared_run)]},
+            "2": {"name": "地方馬", "hist": [dict(shared_run)]},
+        }
+        with patch.object(kb, "_load_speed_race_meta", return_value=[]), \
+                patch.object(kb, "_load_speed_history_rows", return_value=[]):
+            result = kb.calculate_common_speed_indices(horses, as_of=datetime(2026, 6, 20))
+        self.assertTrue(kb._is_jra_exchange_race(horses))
+        self.assertAlmostEqual(result["1"]["index"] - result["2"]["index"], 14.0, places=1)
+        self.assertAlmostEqual(result["1"]["highest_index"] - result["2"]["highest_index"], 14.0, places=1)
+        self.assertEqual(result["1"]["jra_exchange_bonus"], 14.0)
+
+    def test_course_db_all_102_courses_are_available(self):
+        payload = kb._load_jra_course_db_reference()
+        scales = kb._build_jra_course_db_scales(payload)
+        self.assertEqual(payload["course_count"], 102)
+        tokyo = scales[("東京", "ダ", 1400, "")]
+        self.assertGreaterEqual(tokyo["samples"], 400)
+        self.assertEqual(tokyo["reference_provider"], "course-db.com")
+        self.assertIn("過去5年", tokyo["source"])
+
+    def test_course_db_reference_overrides_sparse_jra_history(self):
+        sparse = {
+            "exact_surface": {("東京", "ダ", 1400): {
+                "average_time": 99.0, "record_time": 95.0, "samples": 1,
+            }},
+            "exact_distance": {}, "category_surface": {}, "category_distance": {},
+            "jra_course_db": kb._build_jra_course_db_scales(),
+        }
+        scale = kb._speed_scale_for_run("東京", "ダ", 1400, sparse)
+        self.assertNotEqual(scale["average_time"], 99.0)
+        self.assertEqual(scale["reference_provider"], "course-db.com")
+
     def test_average_70_record_grade_100_scale(self):
         scale = kb._speed_record_scale([70.0, 72.0, 74.0, 76.0], 1200)
         self.assertEqual(scale["average_time"], 73.0)
@@ -115,7 +152,7 @@ class CommonSpeedIndexTests(unittest.TestCase):
         self.assertEqual(average_index, 70.0)
         self.assertEqual(record_index, 100.0)
 
-    def test_same_course_distance_max_is_exposed(self):
+    def test_same_course_distance_index_is_exposed(self):
         horses = {
             "1": {"hist": [
                 {"time": 91.0, "dist": "1400", "place": "川崎", "date": "26.6.5", "url": ""},
@@ -127,25 +164,134 @@ class CommonSpeedIndexTests(unittest.TestCase):
             result = kb.calculate_common_speed_indices(
                 horses, current_course="川崎", current_dist="1400", as_of=datetime(2026, 6, 20)
             )
-        self.assertIsNotNone(result["1"]["same_condition_max"])
-        self.assertEqual(result["1"]["same_condition_runs"], 1)
+        self.assertIsNotNone(result["1"]["course_index"])
+        self.assertEqual(result["1"]["course_runs"], 1)
+        self.assertIsNotNone(result["1"]["highest_index"])
 
-    def test_speed_table_displays_only_two_index_types(self):
+    def test_current_draw_side_changes_main_index(self):
+        histories = [
+            {"time": 88.0, "dist": "1400", "place": "川崎", "date": "26.6.5", "field_size": 8, "gate_no": 1},
+            {"time": 89.0, "dist": "1400", "place": "川崎", "date": "26.5.5", "field_size": 8, "gate_no": 2},
+            {"time": 94.0, "dist": "1400", "place": "川崎", "date": "26.4.5", "field_size": 8, "gate_no": 7},
+            {"time": 95.0, "dist": "1400", "place": "川崎", "date": "26.3.5", "field_size": 8, "gate_no": 8},
+        ]
+        horses = {
+            "1": {"name": "内枠馬", "hist": histories},
+            "8": {"name": "外枠馬", "hist": histories},
+        }
+        with patch.object(kb, "_load_speed_race_meta", return_value=[]), \
+                patch.object(kb, "_load_speed_history_rows", return_value=[]):
+            result = kb.calculate_common_speed_indices(horses, as_of=datetime(2026, 6, 20))
+            urawa_result = kb.calculate_common_speed_indices(
+                horses, current_course="浦和", current_dist="1400", as_of=datetime(2026, 6, 20)
+            )
+        self.assertEqual(result["1"]["current_draw_side"], "内")
+        self.assertEqual(result["8"]["current_draw_side"], "外")
+        self.assertGreater(result["1"]["index"], result["8"]["index"])
+        self.assertGreater(result["1"]["inside_index"], result["1"]["outside_index"])
+        # 浦和は2日20競走の検証値に従い、枠側差を50%に抑えて過適合を避ける。
+        self.assertLess(
+            urawa_result["1"]["index"] - urawa_result["8"]["index"],
+            result["1"]["index"] - result["8"]["index"],
+        )
+
+    def test_speed_table_displays_three_index_types(self):
         horses = {"1": {"name": "テストホース"}}
         scored = {"1": {
             "common_speed_index": 82.5,
-            "common_speed_same_max": 86.1,
-            "common_speed_same_runs": 2,
+            "common_speed_highest_index": 90.1,
+            "common_speed_course_index": 86.1,
+            "common_speed_course_runs": 2,
+            "common_speed_inside_index": 82.5,
+            "common_speed_outside_index": 79.4,
+            "common_speed_inside_runs": 3,
+            "common_speed_outside_runs": 2,
+            "common_speed_draw_side": "内",
             "common_speed_rank": 1,
             "common_speed_runs": 5,
             "common_speed_best_run": {},
         }}
         table = kb.build_speed_index_table(horses, scored)
         self.assertIn("<th>指数</th>", table)
-        self.assertIn("<th>同場同距離</th>", table)
+        self.assertIn("<th>最高指数</th>", table)
+        self.assertIn("<th>コース指数</th>", table)
+        self.assertIn("今回内側", table)
+        self.assertNotIn("内82.5/外79.4", table)
+        self.assertEqual(table.count('class="speed-top3"'), 2)
         self.assertNotIn("今の指数", table)
         self.assertNotIn("<th>レース内</th>", table)
         self.assertNotIn("100.0", table)
+
+    def test_highest_and_course_top3_are_bold_independently(self):
+        horses = {str(i): {"name": f"馬{i}"} for i in range(1, 5)}
+        highest = [91.0, 90.0, 89.0, 88.0]
+        course = [70.0, None, 90.0, 80.0]
+        scored = {}
+        for i in range(1, 5):
+            scored[str(i)] = {
+                "common_speed_index": 85.0 - i,
+                "common_speed_highest_index": highest[i - 1],
+                "common_speed_course_index": course[i - 1],
+                "common_speed_course_runs": 1 if course[i - 1] is not None else 0,
+                "common_speed_draw_side": "内" if i <= 2 else "外",
+                "common_speed_rank": i,
+                "common_speed_runs": 5,
+                "common_speed_best_run": {},
+            }
+        table = kb.build_speed_index_table(horses, scored)
+        # 最高指数3頭＋コース指数が存在する3頭を、それぞれ独立して太字にする。
+        self.assertEqual(table.count('class="speed-top3"'), 6)
+
+
+class JraExchangeScoringTests(unittest.TestCase):
+    def test_exchange_race_removes_jockey_p_and_jockey_fallback(self):
+        horses = {
+            "1": {
+                "name": "[J]中央馬", "jockey": "中央騎手", "prev_jockey": "前騎手",
+                "display_power": "【騎手】P:15(勝30.0%/50.0%)(前P:5)、 相性:勝40.0%(4/10)",
+                "hist": [],
+            },
+            "2": {
+                "name": "地方馬", "jockey": "地方騎手", "prev_jockey": "前騎手",
+                "display_power": "【騎手】P:10(勝15.0%/30.0%)(前P:5)、 相性:勝20.0%(2/10)",
+                "hist": [],
+            },
+        }
+        relative_result = (
+            {"1": 20, "2": 20}, {"1": None, "2": None}, "相対なし", [], {},
+        )
+        with patch.object(kb, "calculate_relative_scores", return_value=relative_result), \
+                patch.object(kb, "calculate_common_speed_indices", return_value={}):
+            scored, _html, _locks, _verdicts = kb.calculate_horse_scores(
+                horses, {}, "川崎", "1400", False, "C2", 1, pace_speed_list=[], is_newcomer=False,
+            )
+        for info in scored.values():
+            self.assertEqual(info["score_2"], 0)
+            self.assertFalse(info["jockey_p_enabled"])
+            self.assertEqual(info["score_5"], 35)
+            self.assertEqual(info["no_relative_grade"], "相対不明(交流中立)")
+
+    def test_exchange_race_ignores_jockey_p_grade_downgrade(self):
+        horses = {"1": {"name": "[J]中央馬"}}
+        scored = {"1": {
+            "jockey_current": "新騎手", "jockey_prev": "前騎手",
+            "jockey_p_base": 3, "jockey_p_prev": 12,
+            "jockey_p_enabled": False,
+        }}
+        grades = {kb._norm_horse_name("[J]中央馬"): "S"}
+        result = kb.apply_display_grade_overrides(grades, horses, scored)
+        self.assertEqual(result[kb._norm_horse_name("[J]中央馬")], "S")
+
+    def test_normal_race_keeps_jockey_p_grade_downgrade(self):
+        horses = {"1": {"name": "地方馬"}}
+        scored = {"1": {
+            "jockey_current": "新騎手", "jockey_prev": "前騎手",
+            "jockey_p_base": 3, "jockey_p_prev": 12,
+            "jockey_p_enabled": True,
+        }}
+        grades = {kb._norm_horse_name("地方馬"): "S"}
+        result = kb.apply_display_grade_overrides(grades, horses, scored)
+        self.assertEqual(result[kb._norm_horse_name("地方馬")], "A")
 
 
 class RelativeTierConsistencyAdditionalTests(unittest.TestCase):
