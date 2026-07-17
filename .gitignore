@@ -10,6 +10,7 @@ data/
 !data/
 data/*
 !data/jra_course_db_times.json
+!data/nar_speed_reference.json
 cache/
 logs/
 *.db

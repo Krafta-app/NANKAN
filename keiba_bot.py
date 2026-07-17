@@ -5,10 +5,11 @@ import os
 import math
 import html
 import json
+import unicodedata
 import requests
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from selenium import webdriver
 import statistics
@@ -136,6 +137,13 @@ SPEED_INDEX_URAWA_DRAW_BLEND_WEIGHT = 0.50
 SPEED_INDEX_JRA_COURSE_DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'data', 'jra_course_db_times.json'
 )
+SPEED_INDEX_NAR_REFERENCE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'data', 'nar_speed_reference.json'
+)
+SPEED_INDEX_NAR_REQUIRED_PLACES = frozenset({
+    '帯広', '門別', '盛岡', '水沢', '浦和', '船橋', '大井', '川崎',
+    '金沢', '笠松', '名古屋', '園田', '姫路', '高知', '佐賀',
+})
 SPEED_INDEX_JRA_FINISHER_MARGIN_PER_1000 = 1.6
 # course-db全102コース導入後にキャッシュ内3交流戦を再検証。
 # 上限同点の並び順に頼らず3着内捕捉が2頭→6頭へ改善する最小値。秒ではなく所属レベル補正。
@@ -143,8 +151,25 @@ SPEED_INDEX_JRA_EXCHANGE_BONUS = 14.0
 _SPEED_META_CACHE = {"signature": None, "rows": []}
 _SPEED_HISTORY_CACHE = {"signature": None, "rows": []}
 _JRA_COURSE_DB_CACHE = {"signature": None, "data": {}}
+_NAR_SPEED_REFERENCE_CACHE = {"signature": None, "data": {}}
+
+
+def _speed_reference_signature():
+    """指数基準ファイル更新後に予想HTMLキャッシュを確実に作り直すための識別子。"""
+    parts = []
+    for label, path in (
+        ('nar', SPEED_INDEX_NAR_REFERENCE_PATH),
+        ('jra', SPEED_INDEX_JRA_COURSE_DB_PATH),
+    ):
+        try:
+            stat = os.stat(path)
+            parts.append(f'{label}:{stat.st_mtime_ns}:{stat.st_size}')
+        except OSError:
+            parts.append(f'{label}:missing')
+    return '|'.join(parts)
 _NANKAN_SPEED_PLACES = {'川崎', '船橋', '浦和', '大井'}
 _JRA_SPEED_PLACES = {'JRA', '札幌', '函館', '福島', '新潟', '東京', '中山', '中京', '京都', '阪神', '小倉'}
+_NAR_SPEED_PLACE_ALIASES = {'帯広ば': '帯広'}
 
 
 def _is_jra_marked_name(name):
@@ -174,10 +199,12 @@ def _winner_clock_to_seconds(value):
 
 def _speed_class_bucket(title):
     """日別馬場差をクラス差から分離するための粗いクラス帯。"""
-    text = str(title or '').upper().replace(' ', '')
+    text = unicodedata.normalize('NFKC', str(title or '')).upper().replace(' ', '')
     for label in ('A1', 'A2', 'B1', 'B2', 'B3', 'C1', 'C2', 'C3'):
         if label in text:
             return label
+    if re.search(r'[234]歳以上', text):
+        return 'その他'
     if '2歳' in text:
         return '2歳'
     if '3歳' in text:
@@ -258,10 +285,19 @@ def _median_or_none(values):
 
 
 def _normalize_speed_surface(place, surface=''):
+    place = _normalize_speed_place(place)
     surface = str(surface or '').strip()
+    if place == '帯広' or surface == 'ばんえい':
+        return 'ばんえい'
     if surface in {'芝', 'ダ', '障'}:
         return surface
     return '' if str(place or '') in _JRA_SPEED_PLACES else 'ダ'
+
+
+def _normalize_speed_place(place):
+    """NAR公式CSVと南関出馬表の場名表記差を統一する。"""
+    value = re.sub(r'\s+', '', str(place or ''))
+    return _NAR_SPEED_PLACE_ALIASES.get(value, value)
 
 
 def _speed_reference_category(place):
@@ -313,7 +349,9 @@ def _load_speed_history_rows(cache_dir='backtest_data'):
         for horse in stored_horses.values():
             horse_name = str((horse or {}).get('name') or '')
             for run in (horse or {}).get('hist', []):
-                place = str((run or {}).get('source_place') or (run or {}).get('place') or '')
+                place = _normalize_speed_place(
+                    (run or {}).get('source_place') or (run or {}).get('place') or ''
+                )
                 if not place or place == '不明':
                     continue
                 dist = _dist_to_int((run or {}).get('dist'))
@@ -336,6 +374,7 @@ def _load_speed_history_rows(cache_dir='backtest_data'):
                     'date': run_date,
                     'place': place,
                     'surface': surface,
+                    'course_variant': str((run or {}).get('course_variant') or ''),
                     'dist': dist,
                     'time': run_time,
                 })
@@ -361,7 +400,7 @@ def _persist_speed_history_rows(horses_data, path=os.path.join('cache', 'speed_h
             continue
         key = (
             str(row.get('horse_name') or ''), str(row.get('date') or ''),
-            str(row.get('source_place') or row.get('place') or ''),
+            _normalize_speed_place(row.get('source_place') or row.get('place') or ''),
             str(row.get('surface') or ''), _dist_to_int(row.get('dist')),
             str(row.get('time') or ''),
         )
@@ -369,7 +408,9 @@ def _persist_speed_history_rows(horses_data, path=os.path.join('cache', 'speed_h
     for horse in (horses_data or {}).values():
         horse_name = str((horse or {}).get('name') or '')
         for hist in (horse or {}).get('hist', []):
-            place = str((hist or {}).get('source_place') or (hist or {}).get('place') or '')
+            place = _normalize_speed_place(
+                (hist or {}).get('source_place') or (hist or {}).get('place') or ''
+            )
             dist = _dist_to_int((hist or {}).get('dist'))
             try:
                 run_time = float((hist or {}).get('time') or 0)
@@ -496,13 +537,57 @@ def _jra_course_db_scale(courses):
     }
 
 
-def _build_jra_course_db_scales(payload=None):
+def _speed_reference_date(value):
+    return parse_date(str(value or '').replace('-', '.').replace('/', '.'))
+
+
+def _reference_is_future(reference_date, as_of):
+    if not isinstance(as_of, datetime) or reference_date == datetime.min:
+        return False
+    # JRA course-dbの更新日は時刻を持たない。更新日当日は日末の結果を
+    # 含む可能性があるため、時刻付きas_ofでも保守的に未来扱いする。
+    return reference_date.date() >= as_of.date()
+
+
+def _nar_snapshot_is_future(payload, as_of):
+    """NARスナップショットの集計終了日/生成時刻が予測時点より後かを判定する。"""
+    if not isinstance(as_of, datetime):
+        return False
+    snapshot_date = _speed_reference_date(
+        (payload or {}).get('as_of') or ((payload or {}).get('window') or {}).get('end')
+    )
+    if snapshot_date == datetime.min:
+        return False
+    if snapshot_date.date() > as_of.date():
+        return True
+    if snapshot_date.date() < as_of.date():
+        return False
+    generated_raw = str((payload or {}).get('generated_at') or '')
+    if generated_raw:
+        try:
+            generated = datetime.fromisoformat(generated_raw.replace('Z', '+00:00'))
+            if generated.tzinfo is not None:
+                jst = timezone(timedelta(hours=9))
+                generated = generated.astimezone(jst).replace(tzinfo=None)
+            return generated > as_of
+        except (TypeError, ValueError):
+            pass
+    # 時刻不明の同日スナップショットは、日付だけのバックテストでは使わない。
+    return as_of.time() == datetime.min.time()
+
+
+def _build_jra_course_db_scales(payload=None, as_of=None):
     """内外回りの完全一致と、内外不明時の統合基準を両方作る。"""
     payload = payload if payload is not None else _load_jra_course_db_reference()
     courses = list((payload or {}).get('courses') or [])
     scales = {}
     by_base = {}
+    by_national = {}
+    by_distance = {}
     for course in courses:
+        updated_date = _speed_reference_date(course.get('updated'))
+        if _reference_is_future(updated_date, as_of):
+            continue
         try:
             key = (
                 str(course.get('place') or ''), str(course.get('surface') or ''),
@@ -516,11 +601,160 @@ def _build_jra_course_db_scales(payload=None):
         if scale:
             scales[key] = scale
         by_base.setdefault(key[:3], []).append(course)
+        by_national.setdefault((key[1], key[2]), []).append(course)
+        by_distance.setdefault(key[2], []).append(course)
     for base_key, grouped in by_base.items():
         combined = _jra_course_db_scale(grouped)
         if combined:
             scales[base_key + ('',)] = combined
+    # 旧保存データで実競馬場が「JRA」までしか分からない場合の全国統合基準。
+    for (surface, dist), grouped in by_national.items():
+        combined = _jra_course_db_scale(grouped)
+        if combined:
+            combined = dict(combined, source=f'course-db JRA{surface}{dist}m統合基準')
+            scales[('JRA', surface, dist, '')] = combined
+    for dist, grouped in by_distance.items():
+        combined = _jra_course_db_scale(grouped)
+        if combined:
+            combined = dict(combined, source=f'course-db JRA{dist}m芝ダ統合近似', confidence='近似')
+            scales[('JRA', '', dist, '')] = combined
     return scales
+
+
+def _load_nar_speed_reference(path=SPEED_INDEX_NAR_REFERENCE_PATH):
+    """NAR公式CSVから事前生成した全地方コース基準を読む。"""
+    try:
+        stat = os.stat(path)
+        signature = (path, stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return {}
+    if _NAR_SPEED_REFERENCE_CACHE.get('signature') == signature:
+        return _NAR_SPEED_REFERENCE_CACHE.get('data') or {}
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return {}
+    courses = list((payload or {}).get('courses') or [])
+    # 帯広を含む地方15場が公式基準の完全版。不完全な中間ファイルは使わない。
+    places = {
+        _normalize_speed_place(place)
+        for place in list((payload or {}).get('places') or [])
+        if _normalize_speed_place(place)
+    }
+    if len(courses) < 50 or not SPEED_INDEX_NAR_REQUIRED_PLACES.issubset(places):
+        return {}
+    _NAR_SPEED_REFERENCE_CACHE['signature'] = signature
+    _NAR_SPEED_REFERENCE_CACHE['data'] = payload
+    return payload
+
+
+def _combine_external_speed_scales(items, source):
+    """内外・回りが不明な近走でも使えるよう、同場・同芝ダ・同距離を統合する。"""
+    rows = [row for row in (items or []) if row and row.get('average_time') and row.get('record_time')]
+    if not rows:
+        return None
+    weights = [max(1, int(row.get('samples', 0) or 0)) for row in rows]
+    total = sum(weights)
+    merged = {
+        'average_time': sum(w * float(row['average_time']) for w, row in zip(weights, rows)) / total,
+        'record_time': sum(w * float(row['record_time']) for w, row in zip(weights, rows)) / total,
+        'samples': sum(int(row.get('samples', 0) or 0) for row in rows),
+        'races': sum(int(row.get('races', 0) or 0) for row in rows),
+        'source': source,
+        'confidence': max(
+            (str(row.get('confidence') or '暫定') for row in rows),
+            key=lambda value: {'高': 0, '中': 1, '暫定': 2, '近似': 3}.get(value, 4),
+        ),
+        'reference_provider': 'NAR公式CSV',
+        'reference_updated': max((str(row.get('reference_updated') or '') for row in rows), default=''),
+    }
+    return merged
+
+
+def _build_nar_speed_scales(payload=None, as_of=None):
+    """NAR公式のコース完全一致基準と、回り不明時の統合基準を作る。"""
+    payload = payload if payload is not None else _load_nar_speed_reference()
+    if _nar_snapshot_is_future(payload, as_of):
+        return {}
+    scales = {}
+    grouped = {}
+    for course in list((payload or {}).get('courses') or []):
+        try:
+            place = _normalize_speed_place(course.get('place') or '')
+            surface = _normalize_speed_surface(place, course.get('surface') or '')
+            dist = int(course.get('distance', 0) or 0)
+            turn = str(course.get('turn') or '')
+            average_time = float(course.get('average_time', 0) or 0)
+            record_time = float(course.get('record_time', 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not place or dist <= 0 or average_time <= record_time or record_time <= 0:
+            continue
+        scale = {
+            'average_time': average_time,
+            'record_time': record_time,
+            'samples': int(course.get('samples', 0) or course.get('finisher_samples', 0) or 0),
+            'races': int(course.get('races', 0) or 0),
+            'source': str(course.get('source') or f'NAR公式 {place}{surface}{dist}m{turn}'),
+            'confidence': str(course.get('confidence') or '暫定'),
+            'reference_provider': 'NAR公式CSV',
+            'reference_updated': str(
+                course.get('reference_updated') or (payload or {}).get('reference_updated') or ''
+            ),
+            'recent_average_time': course.get('recent_average_time'),
+            'long_term_average_time': course.get('long_term_average_time'),
+            'turn': turn,
+        }
+        scales[(place, surface, dist, turn)] = scale
+        grouped.setdefault((place, surface, dist), []).append(scale)
+    for base_key, rows in grouped.items():
+        label = f'NAR公式 {base_key[0]}{base_key[1]}{base_key[2]}m全回り基準'
+        combined = _combine_external_speed_scales(rows, label)
+        if combined:
+            scales[base_key + ('',)] = combined
+    return scales
+
+
+def _build_nar_daily_variants(payload=None, as_of=None):
+    """NAR公式の開催日馬場差を値と説明メタに分けて返す。"""
+    payload = payload if payload is not None else _load_nar_speed_reference()
+    snapshot_is_future = _nar_snapshot_is_future(payload, as_of)
+    if snapshot_is_future:
+        return {}, {}
+    values = {}
+    details = {}
+    for row in list((payload or {}).get('daily_variants') or []):
+        date_text = str(row.get('date') or '').replace('-', '.').replace('/', '.')
+        run_date = parse_date(date_text)
+        if run_date == datetime.min:
+            continue
+        if isinstance(as_of, datetime) and run_date >= as_of:
+            continue
+        place = _normalize_speed_place(row.get('place') or '')
+        surface = _normalize_speed_surface(place, row.get('surface') or '')
+        try:
+            applied = float(
+                row.get('applied_per_1000', row.get('variant_per_1000', 0)) or 0
+            )
+        except (TypeError, ValueError):
+            continue
+        key = (run_date.strftime('%Y.%m.%d'), place, surface)
+        values[key] = applied
+        details[key] = dict(row, applied_per_1000=applied)
+    return values, details
+
+
+def _daily_speed_variant(daily_variants, date_key, place, surface):
+    """新形式(日付・場・芝ダ)を優先し、旧南関形式(日付・場)も読む。"""
+    place = _normalize_speed_place(place)
+    surface = _normalize_speed_surface(place, surface)
+    return float(
+        (daily_variants or {}).get(
+            (str(date_key or ''), place, surface),
+            (daily_variants or {}).get((str(date_key or ''), place), 0.0),
+        ) or 0.0
+    )
 
 
 def _build_speed_scales(history_rows, daily_variants, as_of):
@@ -531,9 +765,12 @@ def _build_speed_scales(history_rows, daily_variants, as_of):
     groups = ({}, {}, {}, {})
     for row in history_rows or []:
         run_date = row.get('date')
-        if isinstance(as_of, datetime) and isinstance(run_date, datetime) and run_date >= as_of:
+        if (
+            isinstance(as_of, datetime) and isinstance(run_date, datetime)
+            and run_date.date() >= as_of.date()
+        ):
             continue
-        place = str(row.get('place') or '')
+        place = _normalize_speed_place(row.get('place') or '')
         surface = _normalize_speed_surface(place, row.get('surface'))
         dist = _dist_to_int(row.get('dist'))
         try:
@@ -542,8 +779,10 @@ def _build_speed_scales(history_rows, daily_variants, as_of):
             continue
         if not place or place == '不明' or dist <= 0 or run_time <= 0:
             continue
-        if place in _NANKAN_SPEED_PLACES and isinstance(run_date, datetime):
-            variant = daily_variants.get((run_date.strftime('%Y.%m.%d'), place), 0.0)
+        if isinstance(run_date, datetime):
+            variant = _daily_speed_variant(
+                daily_variants, run_date.strftime('%Y.%m.%d'), place, surface
+            )
             run_time -= variant * dist / 1000.0
         category = _speed_reference_category(place)
         keys = (
@@ -565,7 +804,8 @@ def _build_speed_scales(history_rows, daily_variants, as_of):
         'exact_distance': exact_distance,
         'category_surface': category_surface,
         'category_distance': category_distance,
-        'jra_course_db': _build_jra_course_db_scales(),
+        'jra_course_db': _build_jra_course_db_scales(as_of=as_of),
+        'nar_official': _build_nar_speed_scales(as_of=as_of),
     }
 
 
@@ -588,6 +828,7 @@ def _blend_speed_scales(exact, fallback, label):
 
 
 def _speed_scale_for_run(place, surface, dist, scales, course_variant=''):
+    place = _normalize_speed_place(place)
     category = _speed_reference_category(place)
     surface = _normalize_speed_surface(place, surface)
     if place in _JRA_SPEED_PLACES and place != 'JRA' and surface in {'芝', 'ダ'}:
@@ -595,6 +836,18 @@ def _speed_scale_for_run(place, surface, dist, scales, course_variant=''):
         external = (
             course_db.get((place, surface, dist, str(course_variant or '')))
             or course_db.get((place, surface, dist, ''))
+        )
+        if external:
+            return dict(external)
+    if place == 'JRA':
+        external = (scales.get('jra_course_db') or {}).get(('JRA', surface, dist, ''))
+        if external:
+            return dict(external)
+    if place not in _JRA_SPEED_PLACES:
+        nar_official = scales.get('nar_official') or {}
+        external = (
+            nar_official.get((place, surface, dist, str(course_variant or '')))
+            or nar_official.get((place, surface, dist, ''))
         )
         if external:
             return dict(external)
@@ -613,7 +866,21 @@ def _speed_scale_for_run(place, surface, dist, scales, course_variant=''):
         if cat == category
     ]
     if not candidates:
-        return None
+        # 公式スナップショット未配置時の最後の安全策。
+        # 現出走馬の時計から基準を作ると自己参照になるため、固定の距離式へ退避する。
+        if surface == 'ばんえい':
+            average_per_1000, record_per_1000 = 850.0, 500.0
+        elif surface == '芝':
+            average_per_1000, record_per_1000 = 62.5, 58.5
+        else:
+            average_per_1000, record_per_1000 = 65.0, 60.0
+        return {
+            'average_time': average_per_1000 * float(dist) / 1000.0,
+            'record_time': record_per_1000 * float(dist) / 1000.0,
+            'samples': 0,
+            'source': f'{place}{surface}{dist}m距離式暫定',
+            'confidence': '近似',
+        }
     _gap, base_dist, base = min(candidates)
     ratio = float(dist) / float(base_dist)
     return {
@@ -625,7 +892,7 @@ def _speed_scale_for_run(place, surface, dist, scales, course_variant=''):
     }
 
 
-def _build_speed_reference(meta_rows):
+def _build_speed_reference(meta_rows, as_of=None):
     """共通時計基準と開催日別の高速・低速馬場差を作る。
 
     日別馬場差は、各勝時計を別日の同場・同距離・同馬場状態・同クラス帯と比較し、
@@ -633,7 +900,17 @@ def _build_speed_reference(meta_rows):
     推定誤差を抑えるため、実際に指数へ使う量は推定値の10%へ縮約する。
     負値=高速、正値=低速。
     """
-    rows = [r for r in (meta_rows or []) if r.get('winner_time') and r.get('dist')]
+    rows = []
+    for row in (meta_rows or []):
+        if not row.get('winner_time') or not row.get('dist'):
+            continue
+        row_date = parse_date(str(row.get('date') or ''))
+        if (
+            isinstance(as_of, datetime) and row_date != datetime.min
+            and row_date.date() >= as_of.date()
+        ):
+            continue
+        rows.append(row)
     by_pd = {}
     by_pdg = {}
     by_pdgc = {}
@@ -737,42 +1014,60 @@ def calculate_common_speed_indices(horses_data, current_course='', current_dist=
     highest_index=取得できた近走の最高値、course_index=今回と同場同距離の実戦指数。
     すべて独立検証軸で、総合点には加算しない。
     """
-    meta_rows = _load_speed_race_meta(cache_dir)
-    _unused_common_par, daily_variants = _build_speed_reference(meta_rows)
-    meta_by_race = {r['race_id']: r for r in meta_rows}
-    if not isinstance(as_of, datetime):
-        _persist_speed_history_rows(horses_data)
     as_of_dt = as_of if isinstance(as_of, datetime) else datetime.now()
+    meta_rows = _load_speed_race_meta(cache_dir)
+    _unused_common_par, local_daily_variants = _build_speed_reference(meta_rows, as_of=as_of_dt)
+    nar_reference = _load_nar_speed_reference()
+    nar_daily_variants, nar_variant_details = _build_nar_daily_variants(
+        nar_reference, as_of=as_of_dt
+    )
+    # NAR公式値を優先し、公式CSVにまだ入っていない南関過去日のみ旧キャッシュで補う。
+    daily_variants = dict(local_daily_variants)
+    daily_variants.update(nar_daily_variants)
+    current_place = _normalize_speed_place(current_course)
+    current_surface = _normalize_speed_surface(current_place, '')
+    current_date_key = as_of_dt.strftime('%Y.%m.%d')
+    current_variant_detail = nar_variant_details.get(
+        (current_date_key, current_place, current_surface), {}
+    )
+    current_day_variant = None
+    if current_variant_detail:
+        current_distances_raw = current_variant_detail.get('distances', 0)
+        if isinstance(current_distances_raw, (list, tuple, set)):
+            current_distances = len(current_distances_raw)
+        else:
+            try:
+                current_distances = int(current_distances_raw or 0)
+            except (TypeError, ValueError):
+                current_distances = 0
+        current_applied = float(current_variant_detail.get('applied_per_1000', 0) or 0)
+        current_day_variant = {
+            'date': current_date_key,
+            'place': current_place,
+            'surface': current_surface,
+            'raw_per_1000': float(current_variant_detail.get('raw_per_1000', 0) or 0),
+            'applied_per_1000': current_applied,
+            'label': _speed_variant_label(current_applied),
+            'races': int(current_variant_detail.get('races', 0) or 0),
+            'distances': current_distances,
+            'confidence': str(current_variant_detail.get('confidence') or ''),
+            'source': str(current_variant_detail.get('source') or 'NAR公式CSV'),
+        }
+    meta_by_race = {r['race_id']: r for r in meta_rows}
     history_rows = _load_speed_history_rows()
 
-    # 今回取得した近走も基準素材へ加える。過去保存分と重なる走りは除外する。
-    seen_rows = {
-        (row.get('horse_name'), row.get('date'), row.get('place'), row.get('surface'), row.get('dist'), round(float(row.get('time') or 0), 2))
-        for row in history_rows
+    # 予測対象自身の時計を70/100基準に混ぜない。処理順と同時出走馬による指数変動を防ぐ。
+    current_names = {
+        str((horse or {}).get('name') or '').strip()
+        for horse in (horses_data or {}).values()
+        if str((horse or {}).get('name') or '').strip()
     }
-    for horse in (horses_data or {}).values():
-        horse_name = str((horse or {}).get('name') or '')
-        for hist in (horse or {}).get('hist', []):
-            place = str((hist or {}).get('source_place') or (hist or {}).get('place') or '')
-            dist = _dist_to_int((hist or {}).get('dist'))
-            run_date = parse_date(str((hist or {}).get('date') or ''))
-            try:
-                run_time = float((hist or {}).get('time') or 0)
-            except (TypeError, ValueError):
-                continue
-            if not place or place == '不明' or dist <= 0 or run_time <= 0 or run_date == datetime.min:
-                continue
-            surface = _normalize_speed_surface(place, (hist or {}).get('surface'))
-            key = (horse_name, run_date, place, surface, dist, round(run_time, 2))
-            if key in seen_rows:
-                continue
-            seen_rows.add(key)
-            history_rows.append({
-                'horse_name': horse_name, 'date': run_date, 'place': place,
-                'surface': surface, 'course_variant': str((hist or {}).get('course_variant') or ''),
-                'dist': dist, 'time': run_time,
-            })
-    scales = _build_speed_scales(history_rows, daily_variants, as_of_dt)
+    reference_history_rows = [
+        row for row in history_rows
+        if str(row.get('horse_name') or '').strip() not in current_names
+    ]
+    scales = _build_speed_scales(reference_history_rows, daily_variants, as_of_dt)
+    # 予測中は基準データを書き換えない。公式基準の更新は専用ツールに分離する。
     current_dist_int = _dist_to_int(current_dist)
     current_field_size = max(
         [int(u) for u in (horses_data or {}).keys() if str(u).isdigit()] or [len(horses_data or {})]
@@ -782,13 +1077,17 @@ def calculate_common_speed_indices(horses_data, current_course='', current_dist=
     for umaban, horse in (horses_data or {}).items():
         jra_exchange_bonus = SPEED_INDEX_JRA_EXCHANGE_BONUS if _is_jra_marked_name((horse or {}).get('name')) else 0.0
         run_scores = []
-        for hist in (horse or {}).get('hist', [])[:5]:
+        # future/無効行を先に除外し、その後で有効な直近5走を採る。
+        # 先に [:5] すると、バックテスト時に未来行が過去の有効走を押し出してしまう。
+        for hist in (horse or {}).get('hist', []):
             try:
                 raw_time = float(hist.get('time'))
             except (TypeError, ValueError):
                 continue
             dist = _dist_to_int(hist.get('dist'))
-            place = str(hist.get('source_place') or hist.get('place') or '')
+            place = _normalize_speed_place(
+                hist.get('source_place') or hist.get('place') or ''
+            )
             surface = _normalize_speed_surface(place, hist.get('surface'))
             course_variant = str(hist.get('course_variant') or '')
             if raw_time <= 0 or dist <= 0 or not place or place == '不明':
@@ -802,9 +1101,22 @@ def calculate_common_speed_indices(horses_data, current_course='', current_dist=
             if not scale:
                 continue
             run_date = parse_date(str(hist.get('date') or meta.get('date') or ''))
+            # 履歴は日付しか持たないため、同日結果も時刻不明の未来情報として除外する。
+            if run_date != datetime.min and run_date.date() >= as_of_dt.date():
+                continue
             date_key = run_date.strftime('%Y.%m.%d') if run_date != datetime.min else meta.get('date', '')
-            # 開催日馬場差は南関4場だけ。JRA・他地方の転入走は競馬場/距離基準のみ。
-            variant = daily_variants.get((date_key, place), 0.0) if is_nankan_run else 0.0
+            # NAR公式の全地方場は同日・同場・同芝ダの馬場差を使う。
+            # JRAは現時点で日別一括データがないためコース基準のみ。
+            variant = _daily_speed_variant(daily_variants, date_key, place, surface)
+            variant_detail = nar_variant_details.get((date_key, place, surface), {})
+            variant_distances_raw = variant_detail.get('distances', 0)
+            if isinstance(variant_distances_raw, (list, tuple, set)):
+                variant_distances = len(variant_distances_raw)
+            else:
+                try:
+                    variant_distances = int(variant_distances_raw or 0)
+                except (TypeError, ValueError):
+                    variant_distances = 0
             # 高速馬場(variant<0)では時計を遅い側へ戻し、低速馬場では速い側へ戻す。
             adjusted_time = raw_time - variant * dist / 1000.0
             scale_range = max(0.5, float(scale['average_time']) - float(scale['record_time']))
@@ -821,6 +1133,10 @@ def calculate_common_speed_indices(horses_data, current_course='', current_dist=
                 'adjusted_time': adjusted_time,
                 'variant_per_1000': variant,
                 'variant_label': _speed_variant_label(variant),
+                'variant_source': str(variant_detail.get('source') or ('NAR公式CSV' if variant_detail else '南関保存結果')),
+                'variant_raw_per_1000': float(variant_detail.get('raw_per_1000', variant) or 0),
+                'variant_races': int(variant_detail.get('races', 0) or 0),
+                'variant_distances': variant_distances,
                 'date': date_key,
                 'place': place,
                 'surface': surface,
@@ -838,8 +1154,13 @@ def calculate_common_speed_indices(horses_data, current_course='', current_dist=
                 'is_transfer': not is_nankan_run,
                 'draw_side': _draw_side(hist.get('field_size'), hist.get('gate_no')),
             })
+            if len(run_scores) >= 5:
+                break
         if not run_scores:
-            result[str(umaban)] = {'index': None, 'rank': None, 'runs': 0, 'corrected_runs': 0}
+            result[str(umaban)] = {
+                'index': None, 'rank': None, 'runs': 0, 'corrected_runs': 0,
+                'current_day_variant': current_day_variant,
+            }
             continue
         form = _speed_form_metrics(run_scores)
         base_index_raw = float(form['index'])
@@ -906,6 +1227,7 @@ def calculate_common_speed_indices(horses_data, current_course='', current_dist=
             'outside_runs': len(side_runs['外']),
             'current_draw_side': current_draw_side,
             'jra_exchange_bonus': jra_exchange_bonus,
+            'current_day_variant': current_day_variant,
             'rank': None,
             'runs': len(run_scores),
             'corrected_runs': sum(abs(r['variant_per_1000']) >= 0.03 for r in run_scores),
@@ -2475,7 +2797,7 @@ DATA_DIR = "2025data"
 JOCKEY_FILE = os.path.join(DATA_DIR, "2025_NARJockey.csv")
 TRAINER_FILE = os.path.join(DATA_DIR, "2025_NankanTrainer.csv")
 POWER_FILE = os.path.join(DATA_DIR, "2025_騎手パワー.xlsx")
-SCORE_POLICY_VERSION = "v20260715d_speed_current_side_only_top3_bold"
+SCORE_POLICY_VERSION = "v20260717_speed_nar_all_courses_daily_variant"
 
 # 当日各コース横断の調教上位(赤字)への加点。
 # 今走調教(中間追い切り含む)だけを対象に、同日・同じ調教場所・同じメトリクスで10頭以上いる場合のみ、3位以内を対象。
@@ -6201,7 +6523,11 @@ def _build_relative_html(G, all_scores, all_tiers, umaban_to_name, name_to_umaba
 # ==================================================
 # 3b. スコア算出
 # ==================================================
-def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dist, is_young, race_class_str, r_num, pace_speed_list=None, is_newcomer=False):
+def calculate_horse_scores(
+    horses_data, cyokyo_data, current_course, current_dist, is_young,
+    race_class_str, r_num, pace_speed_list=None, is_newcomer=False,
+    speed_as_of=None,
+):
     class_ranks = {'2歳': 0, '3歳': 0, 'C3': 0, 'C2': 1, 'C1': 2, 'B3': 3, 'B2': 4, 'B1': 5, 'A2': 6, 'A1': 7}
     standard_times = CHOKYO_STANDARD_3F
 
@@ -6220,6 +6546,7 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
     # 検証段階のため総合点へは足さず、順位と根拠だけを表示する。
     common_speed_indices = calculate_common_speed_indices(
         horses_data, current_course=current_course, current_dist=current_dist,
+        as_of=speed_as_of,
     )
     is_jra_exchange = _is_jra_exchange_race(horses_data)
 
@@ -6514,6 +6841,7 @@ def calculate_horse_scores(horses_data, cyokyo_data, current_course, current_dis
             "common_speed_corrected_runs": speed_info.get("corrected_runs", 0),
             "common_speed_best_run": speed_info.get("best_run"),
             "common_speed_jra_exchange_bonus": speed_info.get("jra_exchange_bonus", 0),
+            "common_speed_current_day_variant": speed_info.get("current_day_variant"),
             "has_no_relative": has_no_relative,
             "jockey_p_enabled": not is_jra_exchange,
             "is_newcomer": is_newcomer,
@@ -6924,10 +7252,12 @@ def format_deterministic_evaluation(horses_data: dict, cyokyo_data: dict, scored
             variant = float(speed_best.get("variant_per_1000", 0) or 0)
             variant_note = ""
             if abs(variant) >= 0.03:
+                variant_races = int(speed_best.get('variant_races', 0) or 0)
+                evidence = f"/{variant_races}R根拠" if variant_races else ""
                 variant_note = (
                     f" / 最良走:{speed_best.get('date', '')}{speed_best.get('place', '')}"
                     f"{speed_best.get('dist', '')}m {speed_best.get('variant_label', '')}馬場"
-                    f"{abs(variant):.1f}秒/1000m補正"
+                    f"{abs(variant):.1f}秒/1000m補正{evidence}"
                 )
             highest_note = f"{float(speed_highest):.1f}" if speed_highest is not None else "なし"
             course_note = f"{float(speed_course):.1f}（{speed_course_runs}走）" if speed_course is not None else "なし"
@@ -7087,7 +7417,8 @@ def parse_nankankeiba_detail(html, place_name, resources):
     if not table: return data
 
     PLACE_MAP = {"船": "船橋", "大": "大井", "川": "川崎", "浦": "浦和", "門": "門別", "盛": "盛岡", "水": "水沢",
-                 "笠": "笠松", "名": "名古屋", "園": "園田", "姫": "姫路", "高": "高知", "佐": "佐賀"}
+                 "金": "金沢", "笠": "笠松", "名": "名古屋", "園": "園田", "姫": "姫路", "高": "高知", "佐": "佐賀",
+                 "帯": "帯広"}
     JRA_PLACES = {"札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉"}
     KNOWN_PLACES = list(PLACE_MAP.values()) + ["JRA"] + list(JRA_PLACES)
 
@@ -7212,7 +7543,9 @@ def parse_nankankeiba_detail(html, place_name, resources):
 
                 # 相対評価では従来どおり中央10場を「JRA」とまとめるが、速度指数では
                 # 東京/中山など実競馬場と芝・ダート・障害を分けて基準時計を作る。
-                if source_place in JRA_PLACES:
+                if source_place == "帯広":
+                    surface = "ばんえい"
+                elif source_place in JRA_PLACES:
                     if re.search(r'障', z_full_text):
                         surface = "障"
                     elif re.search(r'芝', z_full_text):
@@ -7221,6 +7554,9 @@ def parse_nankankeiba_detail(html, place_name, resources):
                         surface = "ダ"
                     else:
                         surface = ""
+                elif re.search(r'芝', z_full_text):
+                    # 盛岡芝も公式NAR基準の別コースとして扱う。
+                    surface = "芝"
                 else:
                     surface = "ダ"
 
@@ -9463,6 +9799,7 @@ def build_speed_index_table(horses_data, scored_data):
             'outside_runs': int(sc.get('common_speed_outside_runs', 0) or 0),
             'draw_side': sc.get('common_speed_draw_side'),
             'jra_bonus': float(sc.get('common_speed_jra_exchange_bonus', 0) or 0),
+            'current_day_variant': sc.get('common_speed_current_day_variant'),
             'rank': rank,
             'runs': int(sc.get('common_speed_runs', 0) or 0),
             'best': best,
@@ -9483,6 +9820,10 @@ def build_speed_index_table(horses_data, scored_data):
 
     highest_top3 = _top3_umabans('highest_index')
     course_top3 = _top3_umabans('course_index')
+    current_day_variant = next(
+        (row.get('current_day_variant') for row in rows if row.get('current_day_variant')),
+        None,
+    )
 
     body = []
     for row in rows:
@@ -9492,11 +9833,20 @@ def build_speed_index_table(horses_data, scored_data):
                 f"{best.get('date', '')} {best.get('place', '')}"
                 f"{best.get('surface', '')}{best.get('dist', '')}m"
             )
-            if best.get('is_transfer'):
-                adjust_text = f"{best.get('par_source', '転入元基準')}・日別補正なし"
+            provider = str(best.get('reference_provider') or '')
+            label = best.get('variant_label', '標準')
+            variant = float(best.get('variant_per_1000', 0) or 0)
+            if provider == 'NAR公式CSV':
+                if abs(variant) >= 0.03:
+                    races = int(best.get('variant_races', 0) or 0)
+                    evidence = f"・{races}R" if races else ''
+                    adjust_text = f"{best.get('par_source', 'NAR公式基準')}・{label}日補正{evidence}"
+                else:
+                    adjust_text = f"{best.get('par_source', 'NAR公式基準')}・当日標準"
+            elif provider == 'course-db.com' or best.get('place') in _JRA_SPEED_PLACES:
+                adjust_text = f"{best.get('par_source', 'JRAコース基準')}・日別補正なし"
             else:
-                label = best.get('variant_label', '標準')
-                adjust_text = f"南関{label}補正" if label != '標準' else "南関標準"
+                adjust_text = f"保存結果{label}補正" if label != '標準' else "保存結果基準"
         else:
             best_text = '比較可能な時計なし'
             adjust_text = '-'
@@ -9538,12 +9888,33 @@ def build_speed_index_table(horses_data, scored_data):
             f'<td><small>{html.escape(adjust_text)}</small></td>'
             '</tr>'
         )
+    if current_day_variant:
+        today_races = int(current_day_variant.get('races', 0) or 0)
+        today_distances = int(current_day_variant.get('distances', 0) or 0)
+        today_applied = float(current_day_variant.get('applied_per_1000', 0) or 0)
+        if today_races < SPEED_INDEX_DAILY_VARIANT_MIN_RACES:
+            today_note = (
+                f"本日の馬場差: {current_day_variant.get('place', '')}"
+                f"{current_day_variant.get('surface', '')} {today_races}R集計中"
+                f"（{SPEED_INDEX_DAILY_VARIANT_MIN_RACES}R未満のため補正保留）。"
+            )
+        else:
+            today_note = (
+                f"本日の馬場差: {current_day_variant.get('place', '')}"
+                f"{current_day_variant.get('surface', '')} {today_applied:+.2f}秒/1000m"
+                f"（{current_day_variant.get('label', '標準')}、{today_races}R・{today_distances}距離）。"
+            )
+    else:
+        today_note = '本日の馬場差: 公式確定データの集計待ち。'
     return (
-        '<div class="speed-index-note">指数は今回の内側/外側に該当する値だけを表示します。'
+        '<div class="speed-index-note">' + html.escape(today_note)
+        + ' 指数は今回の内側/外側に該当する値だけを表示します。'
         '最高指数は取得できた近走の最高値、コース指数は今回と同競馬場・同距離の実戦指数です。'
         '最高指数・コース指数は、それぞれ上位3頭を太字にします。'
         'いずれも平均級70・レコード級100で、総合点には加算しません。'
-        'JRA・他地方は日別補正なしで、競馬場・芝ダート・距離別基準を使います。'
+        '過去走は各走日の馬場差で標準化し、本日の馬場差は能力順位へ一律加算しません。'
+        '地方はNAR公式の全場・芝ダート・回り・距離別基準と開催日馬場差を使います。'
+        'JRAはcourse-dbの全102コース基準を使い、日別補正はありません。'
         f'[J]交流馬は所属レベル差として指数に+{SPEED_INDEX_JRA_EXCHANGE_BONUS:.0f}します。</div>'
         '<div class="table-wrap"><table class="speed-index-table">'
         '<thead><tr><th>順位</th><th>馬</th><th>指数</th>'
@@ -10375,6 +10746,10 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                             mode in ("dify", "normal", "relative", "pace")
                             and cached_data.get("score_policy") != SCORE_POLICY_VERSION
                         )
+                        cache_needs_refresh = cache_needs_refresh or (
+                            cached_data.get("speed_reference_signature")
+                            != _speed_reference_signature()
+                        )
                         if any(x in data_text for x in ["（回答生成エラー）", "⚠️", "パースエラー", "Error"]):
                             pass
                         elif cache_needs_refresh:
@@ -10518,7 +10893,8 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                             json.dump({
                                 "data_text": final_text,
                                 "data_html": final_html,
-                                "score_policy": SCORE_POLICY_VERSION
+                                "score_policy": SCORE_POLICY_VERSION,
+                                "speed_reference_signature": _speed_reference_signature(),
                             }, f, ensure_ascii=False)
                     except Exception:
                         pass
@@ -10553,7 +10929,8 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                             json.dump({
                                 "data_text": final_text,
                                 "data_html": final_html,
-                                "score_policy": SCORE_POLICY_VERSION
+                                "score_policy": SCORE_POLICY_VERSION,
+                                "speed_reference_signature": _speed_reference_signature(),
                             }, f, ensure_ascii=False)
                     except Exception:
                         pass
@@ -10582,8 +10959,14 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                 m_class = re.search(r'([A-C][1-3]|A[12]|[23]歳)', header1)
                 race_class_str = m_class.group(1).replace('Ａ','A').replace('Ｂ','B').replace('Ｃ','C') if m_class else "C2"
 
+                target_race_date = datetime(int(year), int(month), int(day))
+                if target_race_date.date() == datetime.now().date():
+                    # 当日だけは更新済みの前半R馬場差を、生成時点まで利用する。
+                    target_race_date = datetime.now()
                 scored_data, index_table_html, rank_locks, internal_verdicts = calculate_horse_scores(
-                    nk_data["horses"], cyokyo, current_course, current_dist, is_young, race_class_str, r_num, pace_speed_list, is_newcomer=is_newcomer
+                    nk_data["horses"], cyokyo, current_course, current_dist,
+                    is_young, race_class_str, r_num, pace_speed_list,
+                    is_newcomer=is_newcomer, speed_as_of=target_race_date,
                 )
 
                 # 展開加点(⑦): S/Mの前5頭+5と、競馬場×距離別の前30%+3〜7を合計へ加算。
@@ -10708,6 +11091,7 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                                 "grades": grades,
                                 "eval_list_text": eval_list_text,
                                 "score_policy": SCORE_POLICY_VERSION,
+                                "speed_reference_signature": _speed_reference_signature(),
                                 "race_id": nk_id,
                                 "course": current_course,
                                 "dist": str(current_dist),
@@ -10823,6 +11207,7 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                                     "data_text": rb["text"], "data_html": rb["html"],
                                     "ai_out_clean": rb["ai"], "grades": rb["grades"],
                                     "eval_list_text": rb["eval"], "score_policy": SCORE_POLICY_VERSION,
+                                    "speed_reference_signature": _speed_reference_signature(),
                                     "race_id": p["nk_id"], "course": p["current_course"],
                                     "dist": str(p["current_dist"]), "post_time": p["post_time"],
                                     "uma_ids": uma_ids_map,

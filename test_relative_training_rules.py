@@ -1,8 +1,59 @@
 import unittest
-from datetime import datetime
+import zipfile
+from datetime import date, datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import keiba_bot as kb
+import tools.update_nar_speed_reference as nar_updater
+
+
+class NarSpeedReferenceUpdaterTests(unittest.TestCase):
+    @staticmethod
+    def _make_minimal_zip(path):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("test_racelist.csv", "x")
+            archive.writestr("test_horselist.csv", "x")
+
+    def test_daily_refresh_failure_keeps_last_valid_daily_zip(self):
+        def fake_download(url, target, refresh=False):
+            if "type=daily" in url:
+                raise OSError("temporary network failure")
+            self._make_minimal_zip(target)
+            return target, True
+
+        with TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            cached_daily = cache_dir / "daily" / "20260717_race.zip"
+            self._make_minimal_zip(cached_daily)
+            with patch.object(nar_updater, "download_archive", side_effect=fake_download):
+                sources, warnings = nar_updater.prepare_archives(
+                    date(2026, 7, 17), 1, cache_dir, workers=2,
+                    today=date(2026, 7, 17),
+                )
+        daily = [source for source in sources if source.kind == "daily"]
+        self.assertEqual(len(daily), 1)
+        self.assertEqual(daily[0].path, cached_daily)
+        self.assertIn("直前キャッシュで継続", warnings[0])
+
+    def test_partial_venue_snapshot_is_not_written(self):
+        row = nar_updater.RaceClock(
+            "浦和", "浦和", date(2026, 7, 1), 1, "ダ", "左", 1400,
+            "良", "C2", "C2", 1, 1, 90.0,
+        )
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output = root / "reference.json"
+            with patch.object(nar_updater, "prepare_archives", return_value=([], [])), \
+                    patch.object(nar_updater, "load_race_clocks", return_value=([row], {})):
+                with self.assertRaisesRegex(RuntimeError, "地方15場"):
+                    nar_updater.update_reference(
+                        date(2026, 7, 17), 5, root / "cache", output, offline=True,
+                    )
+            self.assertFalse(output.exists())
 
 
 class TrainingComparisonTests(unittest.TestCase):
@@ -65,6 +116,169 @@ class CommonSpeedIndexTests(unittest.TestCase):
         self.assertEqual(kb._winner_clock_to_seconds("549"), 54.9)
         self.assertEqual(kb._winner_clock_to_seconds("1324"), 92.4)
         self.assertEqual(kb._winner_clock_to_seconds("2163"), 136.3)
+
+    def test_fullwidth_class_label_is_normalized(self):
+        self.assertEqual(kb._speed_class_bucket("Ｃ２　三組"), "C2")
+        self.assertEqual(kb._speed_class_bucket("３歳　未格付"), "3歳")
+
+    def test_nar_official_course_scale_is_built(self):
+        payload = {"courses": [{
+            "place": "金沢", "surface": "ダ", "turn": "右", "distance": 1400,
+            "average_time": 92.4, "record_time": 87.8, "samples": 1234, "races": 130,
+            "confidence": "高", "reference_updated": "2026-07-15",
+        }]}
+        scales = kb._build_nar_speed_scales(payload)
+        exact = scales[("金沢", "ダ", 1400, "右")]
+        combined = scales[("金沢", "ダ", 1400, "")]
+        self.assertEqual(exact["reference_provider"], "NAR公式CSV")
+        self.assertEqual(combined["samples"], 1234)
+        self.assertAlmostEqual(combined["average_time"], 92.4)
+
+    def test_nar_official_snapshot_covers_all_15_venues(self):
+        payload = kb._load_nar_speed_reference()
+        scales = kb._build_nar_speed_scales(payload)
+        self.assertEqual(payload["venue_count"], 15)
+        self.assertGreaterEqual(payload["course_count"], 100)
+        self.assertGreaterEqual(payload["race_count"], 70000)
+        self.assertGreaterEqual(payload["finisher_count"], 700000)
+        for key in (
+            ("金沢", "ダ", 1400, ""),
+            ("盛岡", "芝", 1000, ""),
+            ("帯広", "ばんえい", 200, ""),
+            ("大井", "ダ", 1200, ""),
+        ):
+            self.assertIn(key, scales)
+            self.assertEqual(scales[key]["reference_provider"], "NAR公式CSV")
+
+    def test_nar_daily_variant_respects_as_of(self):
+        payload = {"daily_variants": [{
+            "date": "2026.06.10", "place": "金沢", "surface": "ダ",
+            "raw_per_1000": -1.1, "applied_per_1000": -0.7,
+            "races": 9, "distances": [1300, 1400],
+        }]}
+        included, detail = kb._build_nar_daily_variants(payload, as_of=datetime(2026, 6, 11))
+        self.assertEqual(included[("2026.06.10", "金沢", "ダ")], -0.7)
+        self.assertEqual(detail[("2026.06.10", "金沢", "ダ")]["races"], 9)
+        excluded, _ = kb._build_nar_daily_variants(payload, as_of=datetime(2026, 6, 10))
+        self.assertNotIn(("2026.06.10", "金沢", "ダ"), excluded)
+
+    def test_live_current_day_variant_is_exposed_without_changing_ability_axes(self):
+        payload = {
+            "as_of": "2026-07-17",
+            "generated_at": "2026-07-17T06:00:00+00:00",  # 15:00 JST
+            "courses": [{
+                "place": "金沢", "surface": "ダ", "turn": "右", "distance": 1400,
+                "average_time": 92.4, "record_time": 87.8, "samples": 1234,
+            }],
+            "daily_variants": [{
+                "date": "2026-07-17", "place": "金沢", "surface": "ダ",
+                "raw_per_1000": -0.6, "applied_per_1000": -0.2,
+                "races": 4, "distances": [1300, 1400], "source": "NAR公式CSV",
+            }],
+        }
+        horses = {"1": {"name": "当日確認馬", "hist": [{
+            "time": 91.0, "dist": "1400", "place": "金沢", "date": "26.6.1",
+        }]}}
+        with patch.object(kb, "_load_speed_race_meta", return_value=[]), \
+                patch.object(kb, "_load_nar_speed_reference", return_value=payload), \
+                patch.object(kb, "_load_speed_history_rows", return_value=[]):
+            result = kb.calculate_common_speed_indices(
+                horses, current_course="金沢", current_dist="1400",
+                as_of=datetime(2026, 7, 17, 16, 0),
+            )
+        today = result["1"]["current_day_variant"]
+        self.assertEqual(today["label"], "高速")
+        self.assertEqual(today["races"], 4)
+        self.assertAlmostEqual(today["applied_per_1000"], -0.2)
+        self.assertEqual(result["1"]["index"], result["1"]["base_index"])
+
+    def test_future_nar_snapshot_is_not_used_in_backtest(self):
+        payload = {
+            "as_of": "2026-07-17",
+            "courses": [{
+                "place": "金沢", "surface": "ダ", "turn": "右", "distance": 1400,
+                "average_time": 92.4, "record_time": 87.8, "samples": 1234,
+            }],
+        }
+        scales = kb._build_nar_speed_scales(payload, as_of=datetime(2026, 6, 20))
+        self.assertEqual(scales, {})
+        payload["daily_variants"] = [{
+            "date": "2026.06.10", "place": "金沢", "surface": "ダ",
+            "applied_per_1000": -0.7,
+        }]
+        variants, _ = kb._build_nar_daily_variants(payload, as_of=datetime(2026, 6, 20))
+        self.assertEqual(variants, {})
+
+    def test_same_day_nar_snapshot_uses_generation_time(self):
+        payload = {
+            "as_of": "2026-07-17",
+            "generated_at": "2026-07-17T06:00:00+00:00",  # 15:00 JST
+        }
+        self.assertTrue(kb._nar_snapshot_is_future(payload, datetime(2026, 7, 17, 10, 0)))
+        self.assertFalse(kb._nar_snapshot_is_future(payload, datetime(2026, 7, 17, 16, 0)))
+        self.assertFalse(kb._nar_snapshot_is_future(payload, datetime(2026, 7, 18, 0, 0)))
+
+    def test_date_only_jra_reference_is_rejected_on_same_day(self):
+        reference_date = kb._speed_reference_date("2026/07/12")
+        self.assertTrue(kb._reference_is_future(reference_date, datetime(2026, 7, 12, 10, 0)))
+        self.assertFalse(kb._reference_is_future(reference_date, datetime(2026, 7, 13, 0, 0)))
+
+    def test_future_horse_run_is_not_used_in_backtest(self):
+        horses = {"1": {"name": "時系列馬", "hist": [
+            {"time": 80.0, "dist": "1400", "place": "川崎", "date": "26.7.5"},
+            {"time": 81.0, "dist": "1400", "place": "川崎", "date": "26.7.4"},
+            {"time": 82.0, "dist": "1400", "place": "川崎", "date": "26.7.3"},
+            {"time": 83.0, "dist": "1400", "place": "川崎", "date": "26.7.2"},
+            {"time": 84.0, "dist": "1400", "place": "川崎", "date": "26.7.1"},
+            # 日付しかない同日結果も、10時時点では未来情報として除外する。
+            {"time": 85.0, "dist": "1400", "place": "川崎", "date": "26.6.20"},
+            {"time": 91.0, "dist": "1400", "place": "川崎", "date": "26.6.1"},
+        ]}}
+        with patch.object(kb, "_load_speed_race_meta", return_value=[]), \
+                patch.object(kb, "_load_nar_speed_reference", return_value={}), \
+                patch.object(kb, "_load_speed_history_rows", return_value=[]):
+            result = kb.calculate_common_speed_indices(horses, as_of=datetime(2026, 6, 20, 10, 0))
+        self.assertEqual(result["1"]["runs"], 1)
+        self.assertEqual(result["1"]["best_run"]["date"], "2026.06.01")
+
+    def test_date_only_local_fallback_rows_are_excluded_on_as_of_day(self):
+        meta = self._meta_rows() + [
+            {"race_id": f"202606062100000{n}", "date": "2026.06.06", "place": "川崎",
+             "going": "良", "dist": dist, "winner_time": clock,
+             "class_bucket": "C2", "title": "C2"}
+            for n, (dist, clock) in enumerate(((1400, 90.5), (1500, 97.4), (1600, 104.2)), 1)
+        ]
+        _pars, variants = kb._build_speed_reference(meta, as_of=datetime(2026, 6, 6, 10, 0))
+        self.assertNotIn(("2026.06.06", "川崎"), variants)
+
+    def test_current_horse_is_not_mixed_into_reference_scale(self):
+        captured_names = []
+
+        def capture_scales(rows, _variants, _as_of):
+            captured_names.extend(row.get("horse_name") for row in rows)
+            return {
+                "exact_surface": {}, "exact_distance": {},
+                "category_surface": {}, "category_distance": {},
+                "jra_course_db": {}, "nar_official": {},
+            }
+
+        histories = [{
+            "horse_name": "今回馬", "date": datetime(2026, 6, 1), "place": "川崎",
+            "surface": "ダ", "dist": 1400, "time": 91.0,
+        }, {
+            "horse_name": "過去馬", "date": datetime(2026, 6, 1), "place": "川崎",
+            "surface": "ダ", "dist": 1400, "time": 92.0,
+        }]
+        horses = {"1": {"name": "今回馬", "hist": [{
+            "time": 91.0, "dist": "1400", "place": "川崎", "date": "26.6.1",
+        }]}}
+        with patch.object(kb, "_load_speed_race_meta", return_value=[]), \
+                patch.object(kb, "_load_nar_speed_reference", return_value={}), \
+                patch.object(kb, "_load_speed_history_rows", return_value=histories), \
+                patch.object(kb, "_build_speed_scales", side_effect=capture_scales):
+            result = kb.calculate_common_speed_indices(horses, as_of=datetime(2026, 6, 20))
+        self.assertEqual(captured_names, ["過去馬"])
+        self.assertIsNotNone(result["1"]["index"])
 
     def test_fast_day_variant_is_negative(self):
         _pars, variants = kb._build_speed_reference(self._meta_rows())
