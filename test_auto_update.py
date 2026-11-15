@@ -8,11 +8,25 @@ import unittest
 from unittest.mock import Mock, patch
 
 import auto_update as auto
-from nankan_schedule import Meeting, parse_meetings, discover_meetings, discover_races
+from nankan_schedule import Meeting, parse_meetings, discover_meetings, discover_races, fetch_html
 from tools import cloud_update_state as cloud_state
 
 
 class ScheduleTests(unittest.TestCase):
+    def test_browser_fallback_only_for_403(self):
+        session = Mock()
+        session.get.return_value = SimpleNamespace(status_code=403)
+        with patch("nankan_schedule.fetch_browser_html", return_value="<title>年間開催日程</title>") as browser:
+            self.assertIn("開催日程", fetch_html(session, "/calendar/202610.do"))
+            browser.assert_called_once()
+        response = Mock(status_code=404)
+        response.raise_for_status.side_effect = RuntimeError("404")
+        session.get.return_value = response
+        with patch("nankan_schedule.fetch_browser_html") as browser:
+            with self.assertRaises(RuntimeError):
+                fetch_html(session, "/missing")
+            browser.assert_not_called()
+
     def test_exact_date_and_nankan_only(self):
         html = ''.join(f'<a href="/program/{pid}.do">出走表</a>' for pid in [
             "00000000000000", "20261116201201", "20261116201201",

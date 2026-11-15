@@ -53,9 +53,32 @@ def parse_meetings(html, target_date):
 
 def fetch_html(session, path):
     response = session.get(BASE_URL + path, timeout=30, headers=HEADERS)
+    if response.status_code == 403:
+        # HTTP取得だけが拒否される環境では、既存の予想処理と同じChromeで確認する。
+        # ログインが必要なページには使用しない。
+        return fetch_browser_html(BASE_URL + path)
     response.raise_for_status()
     response.encoding = "cp932"
     return response.text
+
+
+def fetch_browser_html(url):
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    options = Options()
+    for option in ("--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--lang=ja-JP"):
+        options.add_argument(option)
+    driver = webdriver.Chrome(options=options)
+    try:
+        driver.set_page_load_timeout(30)
+        driver.get(url)
+        html = driver.page_source
+        title = driver.title or ""
+        if any(word in title.lower() for word in ("403", "forbidden", "access denied")):
+            raise requests.HTTPError(f"公式サイトがChromeからの接続も拒否しました: {title}")
+        return html
+    finally:
+        driver.quit()
 
 
 def discover_meetings(target_date, session=None):
