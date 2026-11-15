@@ -25,6 +25,14 @@ from urllib3.util.retry import Retry
 from urllib.parse import urljoin
 import networkx as nx
 
+try:
+    # NAR公式の月次レースCSVから作る実績データベース。
+    # 無くても（読めなくても）従来どおりスクレイピングだけで動く。
+    import nar_bridge
+except Exception as _nar_exc:  # pragma: no cover - 環境差で落ちても本体は動かす
+    print(f"[NAR CSV] 無効: {_nar_exc}")
+    nar_bridge = None
+
 # ==================================================
 # 0. ユーティリティ
 # ==================================================
@@ -1080,6 +1088,10 @@ def calculate_common_speed_indices(horses_data, current_course='', current_dist=
         # future/無効行を先に除外し、その後で有効な直近5走を採る。
         # 先に [:5] すると、バックテスト時に未来行が過去の有効走を押し出してしまう。
         for hist in (horse or {}).get('hist', []):
+            # CSVで後から足した古い走りは、コース内外回りの区別を持たないので
+            # 共通速度指数の材料には入れない（相対評価と対戦材料にだけ使う）。
+            if hist.get('from_csv'):
+                continue
             try:
                 raw_time = float(hist.get('time'))
             except (TypeError, ValueError):
@@ -1866,7 +1878,34 @@ _BRIDGE_CONSENSUS_LOWER_WEIGHT = 0.6   # best-1の補助票係数（最良priori
 #  精度を上げる材料として票に含める。
 #  直接対決・推移補完は実測/論理なのでゲート対象外。
 _REL_CONFIDENCE_GATE = True            # False で旧挙動(全エッジ採用)に戻せる(A/B用)
-_REL_DOM_EDGE_MIN_BRIDGE_VOTES = 2     # bridgeが層化エッジになるのに必要な合議票数(採用レース/経路数)
+_REL_DOM_EDGE_MIN_BRIDGE_VOTES = 2     # bridgeが層化エッジになるのに必要な合議票数(単位は下の VOTE_BY_YARDSTICK 次第)
+
+# ばんえい移植(1): 隠れ馬(物差し馬)は「1頭1票」。
+#  同じ隠れ馬で3レース比較できても、それは1頭分の材料でしかない。従来は
+#  採用レース/経路ごとに1票だったため、隠れ馬1頭でも票数2以上となり
+#  _REL_DOM_EDGE_MIN_BRIDGE_VOTES を通過して層化エッジ(=主力昇格の根拠)になれた。
+#  Trueで票を隠れ馬単位に畳み、合議の一致率も隠れ馬単位で見る。
+#  ※ 距離・競馬場の優先度(bridge_priority)の扱いは一切変更しない。
+_REL_BRIDGE_VOTE_BY_YARDSTICK = True
+
+# ばんえい移植(2): 最上位tier(主力)の材料量フロア。
+#  比較ルートが1本しか無い馬が、負けが1つも無いというだけで主力に立つのを防ぐ。
+#  「確信できる比較(同場直接対決 or 隠れ馬2頭以上)」の相手数がこの数に満たない
+#  馬は主力を名乗らせず1段下(一軍)へ。勝ちが1つも無い場合も同様(Sフロア)。
+_REL_TOP_COVERAGE = True
+_REL_TOP_COVERAGE_MIN_OPP = 2          # 主力に必要な「確信できる比較相手」の数
+_REL_TOP_COVERAGE_NEED_WIN = True      # 主力に「確信できる勝ち」を1本以上必須にする
+_REL_TOP_COVERAGE_SHIFT_RACE = False   # True: 最上位が全頭薄いレースは全体を1段下げ段差を残す(検証でρ低下のため既定OFF)
+# ばんえい移植(3): tier層化のレベルを「連鎖強さ」で決める。
+#  従来の上から層化は「負けエッジが無い馬=最上位レベル0=主力」なので、弱い1頭に
+#  1勝しただけの馬も主力に立った。ばんえい transitive_strength と同じく
+#  「連鎖で下せる頭数 − 下される頭数」をブロック単位で数え、その降順でレベルを振る。
+_REL_CHAIN_STRENGTH_LEVELS = True
+_REL_CHAIN_STRENGTH_MODE = "band"      # "band": 強さ÷出走頭数を4帯(S/A/B/C)へ / "rank": 強さの降順に生レベル
+# band閾値: 強さ÷出走頭数(比較対象) が S以上 / A(>0) / B / C(以下)。
+#  S=出走頭数の半数以上を連鎖で下せて上に誰もいない級。1勝だけの馬は 1/頭数 でAどまり。
+_REL_CHAIN_BAND_S = 0.5
+_REL_CHAIN_BAND_C = -0.34   # 検証: S0.5/C-0.34でρ+0.133(旧層化+0.102)。S0.34〜0.6・C-0.34〜-0.5で+0.12〜0.13と頑健
 _REL_S_FLOOR = False                   # 最上位グループは必ずS(Sフロアoff)。Sを必ず立てる方を優先(ユーザー採用2026/06/24、6/19のonを撤回)。S複勝率は38%維持
 _REL_C_CEILING = True                  # 確信できる負けが無い馬はCに沈めずBへ(C=ほぼ馬券圏外狙い)
 _REL_C_INTERNAL_WIN_PROMOTE = True     # 三軍内で複数馬に勝ち、三軍内負けなしなら二軍へ救済
@@ -1883,6 +1922,50 @@ _REL_TOP_SCORE = 50.0                   # 最上位レベルの相対点
 _REL_BOTTOM_SCORE = 15.0                # 最下位レベルの相対点
 _REL_FOURTIER_SCORE = {"S": 50, "A": 40, "B": 25, "C": 15}  # 旧4段階の固定配点
 _REL_TIER_DISPLAY_LABELS = {"S": "主力", "A": "一軍", "B": "二軍", "C": "三軍"}
+
+def _chain_strength_levels(block_G, scc_blocks, blocks):
+    """ばんえい transitive_strength の移植。ブロックDAGで推移閉包を取り、
+    強さ = (連鎖で下せる頭数) − (連鎖で下される頭数)。頭数はブロック内の馬数で重み付け。
+    戻り値は {block: level}(level 0 = 最強)。同じ強さは同レベル。
+    mode "band" は強さを出走頭数比で S/A/B/C の4帯に割る。"""
+    blocks = set(blocks)
+    reach = {b: set(succ for succ in block_G.successors(b) if succ in blocks) for b in blocks}
+    for _ in range(len(blocks)):
+        grown = False
+        for b in blocks:
+            extra = set()
+            for c in reach[b]:
+                extra |= reach[c]
+            extra -= reach[b]
+            if extra:
+                reach[b] |= extra
+                grown = True
+        if not grown:
+            break
+    weight = {b: len(scc_blocks[b]) for b in blocks}
+    strength = {}
+    for b in blocks:
+        below = sum(weight[c] for c in reach[b])
+        above = sum(weight[c] for c in blocks if b in reach[c])
+        strength[b] = below - above
+    if _REL_CHAIN_STRENGTH_MODE == "band":
+        n = sum(weight.values()) or 1
+        levels = {}
+        for b in blocks:
+            r = strength[b] / float(n)
+            if r >= _REL_CHAIN_BAND_S:
+                levels[b] = 0
+            elif r > 0:
+                levels[b] = 1
+            elif r > _REL_CHAIN_BAND_C:
+                levels[b] = 2
+            else:
+                levels[b] = 3
+        return levels
+    distinct = sorted(set(strength.values()), reverse=True)
+    idx = {v: i for i, v in enumerate(distinct)}
+    return {b: idx[strength[b]] for b in blocks}
+
 
 def _rel_label_display(label):
     """相対評価の表示名。内部キー(S/A/B/C)は総合ランクと分けて保持する。"""
@@ -2381,11 +2464,36 @@ def _bridge_consensus_symbol(entries, cur_dist):
         w = max(0.10, entry_weight * level_factor)
         th = _bridge_priority_threshold(entry_priority, cur_dist)
         if d >= th:
-            votes.append({"direction": 1, "weight": w, "priority": entry_priority})
+            votes.append({"direction": 1, "weight": w, "priority": entry_priority,
+                          "yardstick": e.get("via_hidden") or ""})
         elif d <= -th:
-            votes.append({"direction": -1, "weight": w, "priority": entry_priority})
+            votes.append({"direction": -1, "weight": w, "priority": entry_priority,
+                          "yardstick": e.get("via_hidden") or ""})
+
+    def _by_yardstick(selected_votes):
+        """ばんえい移植: 隠れ馬(物差し馬)1頭を1票に畳む。
+
+        同じ隠れ馬で複数レース/経路があっても材料は1頭分。その隠れ馬の中で
+        重みの大きい向きをその馬の票とし、重みは勝った側の合計を使う
+        (同じ向きで何度も比較できているほど、その1票は重い)。
+        向きが拮抗(同重み)する隠れ馬は棄権票として落とす。
+        """
+        if not _REL_BRIDGE_VOTE_BY_YARDSTICK:
+            return list(selected_votes)
+        grouped = {}
+        for v in selected_votes:
+            g = grouped.setdefault(v["yardstick"], {1: 0.0, -1: 0.0})
+            g[v["direction"]] += v["weight"]
+        folded = []
+        for yard, g in grouped.items():
+            if g[1] > g[-1]:
+                folded.append({"direction": 1, "weight": g[1], "yardstick": yard})
+            elif g[-1] > g[1]:
+                folded.append({"direction": -1, "weight": g[-1], "yardstick": yard})
+        return folded
 
     def _vote_direction(selected_votes):
+        selected_votes = _by_yardstick(selected_votes)
         positive = sum(v["weight"] for v in selected_votes if v["direction"] > 0)
         negative = sum(v["weight"] for v in selected_votes if v["direction"] < 0)
         total = positive + negative
@@ -2408,10 +2516,13 @@ def _bridge_consensus_symbol(entries, cur_dist):
     else:
         final_direction = combined_direction
 
-    pos_w = sum(v["weight"] for v in votes if v["direction"] > 0)
-    neg_w = sum(v["weight"] for v in votes if v["direction"] < 0)
-    pos_n = sum(1 for v in votes if v["direction"] > 0)
-    neg_n = sum(1 for v in votes if v["direction"] < 0)
+    # 返す票数は層化の確信度ゲート(_REL_DOM_EDGE_MIN_BRIDGE_VOTES)が読む。
+    # 隠れ馬単位に畳んでから数えるので「隠れ馬何頭が同じ向きを示したか」になる。
+    counted = _by_yardstick(votes)
+    pos_w = sum(v["weight"] for v in counted if v["direction"] > 0)
+    neg_w = sum(v["weight"] for v in counted if v["direction"] < 0)
+    pos_n = sum(1 for v in counted if v["direction"] > 0)
+    neg_n = sum(1 for v in counted if v["direction"] < 0)
     n = pos_n + neg_n
     tot = pos_w + neg_w
     if n < _BRIDGE_CONSENSUS_MIN_VOTES or tot <= 0:
@@ -2797,7 +2908,7 @@ DATA_DIR = "2025data"
 JOCKEY_FILE = os.path.join(DATA_DIR, "2025_NARJockey.csv")
 TRAINER_FILE = os.path.join(DATA_DIR, "2025_NankanTrainer.csv")
 POWER_FILE = os.path.join(DATA_DIR, "2025_騎手パワー.xlsx")
-SCORE_POLICY_VERSION = "v20260717_speed_nar_all_courses_daily_variant"
+SCORE_POLICY_VERSION = "v20260917_band_A9_e_rescue"
 
 # 当日各コース横断の調教上位(赤字)への加点。
 # 今走調教(中間追い切り含む)だけを対象に、同日・同じ調教場所・同じメトリクスで10頭以上いる場合のみ、3位以内を対象。
@@ -2828,12 +2939,12 @@ CHOKYO_STANDARD_1F = {
 # secrets 読み込み
 # ==================================================
 try:
-    KEIBA_ID = st.secrets["keibabook"]["login_id"]
+    KEIBA_ID = os.environ.get("KEIBABOOK_LOGIN_ID") or st.secrets["keibabook"]["login_id"]
 except Exception:
     KEIBA_ID = ""
 
 try:
-    KEIBA_PASS = st.secrets["keibabook"]["password"]
+    KEIBA_PASS = os.environ.get("KEIBABOOK_PASSWORD") or st.secrets["keibabook"]["password"]
 except Exception:
     KEIBA_PASS = ""
 
@@ -2976,9 +3087,34 @@ def result_uma_ids(url):
     return _RESULT_UMA_IDS.get(url, {})
 
 
+def _safe_href(url):
+    """画面のリンク用URL。CSV由来の内部キー(nar://…)はリンクにしない。"""
+    if nar_bridge is not None and nar_bridge.is_csv_key(url):
+        return ""
+    return str(url or "")
+
+
 def fetch_race_all_horses(url):
     if url in _RACE_RESULT_CACHE:
         return _RACE_RESULT_CACHE[url]
+
+    # NAR公式CSVに入っているレースは通信せずそこから返す。
+    # 出走全頭・確定着順・人気・馬番が揃うので、相対評価の物差し馬が減らない。
+    if nar_bridge is not None:
+        try:
+            csv_result = nar_bridge.race_all_horses(url)
+        except Exception as exc:
+            print(f"  [NAR CSV] 参照失敗 {url}: {exc}")
+            csv_result = None
+        if csv_result:
+            _RACE_RESULT_CACHE[url] = csv_result
+            return csv_result
+
+    if nar_bridge is not None and nar_bridge.is_csv_key(url):
+        # CSV由来のキーはスクレイピングできない。
+        result = ({}, "", "", {}, {}, {})
+        _RACE_RESULT_CACHE[url] = result
+        return result
 
     sess = get_http_session()
     try:
@@ -3477,6 +3613,7 @@ def _rebuild_race_with_chokyo(p, red_here, rank_here=None):
     grades = apply_internal_rank_locks(grades, p["rank_locks"])
     grades = adjust_grades_by_jockey_choices(grades, horses)
     grades = apply_score_floor_to_grades(grades, horses, scored_data)
+    grades = apply_e_rescue_floor(grades, horses, scored_data)
     grades = ensure_top_grade_presence(grades)
     grades = apply_display_grade_overrides(grades, horses, scored_data)
 
@@ -5413,8 +5550,15 @@ def calculate_relative_scores(horses_data, current_course, current_dist, r_num):
                 b for b in block_G.nodes()
                 if any(h in has_data for h in scc_blocks[b])
             }
+            if _REL_CHAIN_STRENGTH_LEVELS:
+                # ばんえい移植(3): 上から層化(負けが無ければ最上位)ではなく、
+                # ばんえい transitive_strength と同じ「連鎖で下せる頭数 − 下される頭数」を
+                # ブロック単位で数え、その値の降順でレベルを振る。
+                # 弱い1頭に勝っただけの馬(下せる=1)は、複数頭を連鎖で下す馬より下に落ちる。
+                # 比べようがない馬どうしは同じ値になり自然に同レベルへ落ちる。
+                level_by_block = _chain_strength_levels(block_G, scc_blocks, remaining_blocks)
             tier_idx = 0
-            while remaining_blocks:
+            while remaining_blocks and not _REL_CHAIN_STRENGTH_LEVELS:
                 top = {
                     b for b in remaining_blocks
                     if not any(pred in remaining_blocks for pred in block_G.predecessors(b))
@@ -5445,6 +5589,41 @@ def calculate_relative_scores(horses_data, current_course, current_dist, r_num):
             if _REL_CONFIDENCE_GATE and _REL_S_FLOOR:
                 for h in has_data:
                     if tiers.get(h) == "S" and not _has_solid_edge(h, dom_G.successors(h)):
+                        tiers[h] = "A"
+
+            # ばんえい移植(2): 主力(最上位tier)の材料量フロア。
+            #  ばんえいの物差し比較は「同じ向きの物差し馬が2頭以上揃わないと矢印を出さない」。
+            #  その考えをtierへ持ち込み、確信できる比較相手が1頭しかいない馬
+            #  (＝比較ルートが1本見つかっただけの馬)は主力を名乗らせない。
+            #  勝ちが1本も無い馬も同様(従来の_REL_S_FLOORをこちらに統合)。
+            if _REL_CONFIDENCE_GATE and _REL_TOP_COVERAGE:
+                def _solid_opponents(h):
+                    found = set()
+                    for opp in horses:
+                        if opp == h or matchup_matrix.get(h, {}).get(opp) not in (">", "<", "="):
+                            continue
+                        if _has_solid_edge(h, [opp]):
+                            found.add(opp)
+                    return found
+
+                def _thin_top(h):
+                    if len(_solid_opponents(h)) < _REL_TOP_COVERAGE_MIN_OPP:
+                        return True
+                    if _REL_TOP_COVERAGE_NEED_WIN and not _has_solid_edge(h, dom_G.successors(h)):
+                        return True
+                    return False
+
+                top_horses = [h for h in has_data if tiers.get(h) == "S"]
+                thin_tops = [h for h in top_horses if _thin_top(h)]
+                if thin_tops and len(thin_tops) == len(top_horses) and _REL_TOP_COVERAGE_SHIFT_RACE:
+                    # 最上位が全頭「薄い」レースは、層の解像度を潰さずに全体を1段下げる。
+                    # 主力は不在になるが、1位層と2位層の差は一軍/二軍として残る。
+                    for h in has_data:
+                        b = block_by_horse.get(h)
+                        if b is not None and b in level_by_block:
+                            tiers[h] = _rel_level_to_label(level_by_block[b] + 1)
+                else:
+                    for h in thin_tops:
                         tiers[h] = "A"
 
             # C天井(A): 最下位tier(C)は「確信できる負け」が1本以上ある馬に限定する。
@@ -6183,8 +6362,8 @@ def _build_relative_html(G, all_scores, all_tiers, umaban_to_name, name_to_umaba
                 bridge_note = best_pair.get("bridge_note", "") if not best_pair["is_strict"] else ""
                 if bridge_note: place_dist = f"{bridge_note}({place_dist})"
 
-                uh_url = best_pair['uh_hist'].get('url', '')
-                hv_url = best_pair['hv_hist'].get('url', '')
+                uh_url = _safe_href(best_pair['uh_hist'].get('url', ''))
+                hv_url = _safe_href(best_pair['hv_hist'].get('url', ''))
                 best_dt = _pair_latest_dt(best_pair)
                 leg_gates = {
                     "name_a": _hist_gate_for(best_pair["uh_hist"], name_a),
@@ -6323,7 +6502,8 @@ def _build_relative_html(G, all_scores, all_tiers, umaban_to_name, name_to_umaba
                 badge += " <span style='color:#e74c3c; font-weight:bold;'>⚡三すくみ</span>"
 
             race_label = f"{r_date}の{r_place}{r_dist}"
-            link = f"<a href='{r_url}' target='_blank' style='color:#3498db;text-decoration:none;'>🔍{race_label}</a>{badge}" if r_url else f"🔍{race_label}{badge}"
+            r_href = _safe_href(r_url)
+            link = f"<a href='{r_href}' target='_blank' style='color:#3498db;text-decoration:none;'>🔍{race_label}</a>{badge}" if r_href else f"🔍{race_label}{badge}"
 
             rel_str = fmt_opps_by_tier(opps, is_same_condition=(is_match or is_same_layout), is_strict=True)
 
@@ -6364,12 +6544,14 @@ def _build_relative_html(G, all_scores, all_tiers, umaban_to_name, name_to_umaba
                 if cons and (cons[1] + cons[2]) >= 1:
                     cons_pos, cons_neg = cons[1], cons[2]
                     magnitude_label = f"合議{cons_pos}-{cons_neg}"
-                    consensus_note = f"<span style='color:#8e44ad;'>隠れ馬経由{cons_pos + cons_neg}件合議(本馬優勢{cons_pos}/相手優勢{cons_neg})</span> "
+                    _cons_unit = "頭" if _REL_BRIDGE_VOTE_BY_YARDSTICK else "件"
+                    consensus_note = f"<span style='color:#8e44ad;'>隠れ馬経由{cons_pos + cons_neg}{_cons_unit}合議(本馬優勢{cons_pos}/相手優勢{cons_neg})</span> "
                 else:
                     magnitude_label = f"{est:+.1f}"
                     consensus_note = ""
 
                 def _leg(url, label):
+                    url = _safe_href(url)
                     if url:
                         return f"<a href='{url}' target='_blank' style='color:#3498db;text-decoration:none;'>{label}</a>"
                     return f"<span style='color:#888;'>{label}</span>"
@@ -6523,6 +6705,43 @@ def _build_relative_html(G, all_scores, all_tiers, umaban_to_name, name_to_umaba
 # ==================================================
 # 3b. スコア算出
 # ==================================================
+def extend_hist_with_csv(horses_data, target_date, current_course, r_num):
+    """スクレイピング済みの過去走(最大5走)の、さらに前をCSVで足す。
+
+    相対評価は「同じレースを走った馬どうし」で比べるので、材料が1走増えるだけで
+    直接対決と物差し馬が増える。既に取れている走りは重複させない。
+    NANKAN_CSV_HIST=0 で止められる。
+    """
+    if nar_bridge is None or target_date is None:
+        return 0
+    if os.environ.get("NANKAN_CSV_HIST", "1") in ("0", "false", "False"):
+        return 0
+    day = target_date.date() if hasattr(target_date, "date") else target_date
+    added = 0
+    for horse in (horses_data or {}).values():
+        hist = horse.get("hist") or []
+        known_urls = [h.get("url", "") for h in hist if isinstance(h, dict)]
+        oldest = None
+        for h in hist:
+            if not isinstance(h, dict):
+                continue
+            dt = parse_date(str(h.get("date") or ""))
+            if dt != datetime.min and (oldest is None or dt < oldest):
+                oldest = dt
+        try:
+            rows = nar_bridge.extra_hist_rows(
+                horse.get("name", ""), day, target_rno=r_num, target_place=current_course,
+                known_urls=known_urls, oldest_known=oldest,
+            )
+        except Exception as exc:
+            print(f"  [NAR CSV] 過去走の補完に失敗: {exc}")
+            continue
+        if rows:
+            horse["hist"] = list(hist) + rows
+            added += len(rows)
+    return added
+
+
 def calculate_horse_scores(
     horses_data, cyokyo_data, current_course, current_dist, is_young,
     race_class_str, r_num, pace_speed_list=None, is_newcomer=False,
@@ -6530,6 +6749,10 @@ def calculate_horse_scores(
 ):
     class_ranks = {'2歳': 0, '3歳': 0, 'C3': 0, 'C2': 1, 'C1': 2, 'B3': 3, 'B2': 4, 'B1': 5, 'A2': 6, 'A1': 7}
     standard_times = CHOKYO_STANDARD_3F
+
+    csv_hist_added = extend_hist_with_csv(horses_data, speed_as_of, current_course, r_num)
+    if csv_hist_added:
+        print(f"  [NAR CSV] 過去走を{csv_hist_added}走ぶん補完しました")
 
     if is_newcomer:
         relative_scores = {str(u): 0 for u in horses_data.keys()}
@@ -6563,6 +6786,34 @@ def calculate_horse_scores(
     base_rank = class_ranks.get(race_class_str, 1)
     # 全体TOP3とレース内TOP3は全レースの調教素材を集めた後、ループ後段で加点・再描画する。
 
+    # ②騎手点の母集団。NAR月次CSVが読めれば「直近365日の南関実績」から作る。
+    # 2025年の静的な騎手パワー表より、2026-04〜09の16,552出走で
+    # 1着AUC 0.681→0.696 / 3着内AUC 0.648→0.658 と上。
+    # 読めない場合は conn_model=None のまま、従来の騎手パワー表で動く。
+    conn_model = None
+    if nar_bridge is not None and speed_as_of is not None:
+        try:
+            conn_model = nar_bridge.connection_model(
+                speed_as_of.date() if hasattr(speed_as_of, "date") else speed_as_of,
+                place=current_course, rno=r_num,
+            )
+        except Exception as exc:
+            print(f"  [NAR CSV] 騎手成績の作成に失敗: {exc}")
+            conn_model = None
+
+    # A案の材料（近走・速度・前走着順）。CSVが読めないときは空 → 全馬0.5の中立。
+    ability_feats = {}
+    if nar_bridge is not None and speed_as_of is not None:
+        try:
+            ability_feats = nar_bridge.ability_features(
+                horses_data,
+                speed_as_of.date() if hasattr(speed_as_of, "date") else speed_as_of,
+                current_course, r_num,
+            )
+        except Exception as exc:
+            print(f"  [NAR CSV] 能力材料の作成に失敗: {exc}")
+            ability_feats = {}
+
     scored_data = {}
     for umaban, horse_data in horses_data.items():
         flags = []
@@ -6582,7 +6833,8 @@ def calculate_horse_scores(
             chokyo_tanpyo = m_tanpyo.group(1).strip()
             
         current_jockey = (horse_data.get("jockey") or "").strip()
-        
+        current_trainer = (horse_data.get("trainer") or "").strip()
+
         jockey_raw = horse_data.get("display_power", "")
         p_base, p_prev, win_rate, n_count, jockey_win_rate = 5, 5, 0.0, 0, 0.0
         if jockey_raw:
@@ -6617,6 +6869,29 @@ def calculate_horse_scores(
 
         tataki_second = _detect_tataki_second(runs)
         past_jockeys = [r["jockey"] for r in valid_runs]
+
+        # CSVが読めたときは騎手P・前走騎手P・騎手自身の勝率をCSV実績で置き換える。
+        csv_jockey_detail = None
+        if conn_model is not None and current_jockey:
+            try:
+                _prev_j = (horse_data.get("prev_jockey") or (past_jockeys[0] if past_jockeys else "")).strip()
+                csv_jockey_detail = nar_bridge.jockey_detail(
+                    conn_model, current_jockey, current_trainer, current_course,
+                    prev_jockey=_prev_j, horse=horse_data.get("name", ""),
+                )
+                _pts = csv_jockey_detail.get("points")
+                if _pts is not None:
+                    p_base = int(_pts)
+                    _jstat = csv_jockey_detail.get("jockey") or {}
+                    jockey_win_rate = float(_jstat.get("win_rate", 0.0)) * 100.0
+                    _prev_pts = nar_bridge.jockey_points(
+                        conn_model, _prev_j, current_trainer, current_course) if _prev_j else None
+                    p_prev = int(_prev_pts) if _prev_pts is not None else p_base
+                else:
+                    csv_jockey_detail = None
+            except Exception as exc:
+                print(f"  [NAR CSV] 騎手評価に失敗（従来値を使用）: {exc}")
+                csv_jockey_detail = None
         is_demodori = (current_jockey != (past_jockeys[0] if past_jockeys else "") and current_jockey in past_jockeys[:3])
 
         # ②騎手(最大15点):
@@ -6630,7 +6905,11 @@ def calculate_horse_scores(
 
         if is_norikawari and not is_jra_exchange:
             delta = p_base - p_prev   # 乗り替わりによる騎手Pの増減
-            score_2 += delta
+            # 検証では、この加減算は騎手点の当たりを下げる
+            # （2026-04〜09の南関16,552出走で1着AUC 0.695→0.674）。
+            # 既定は従来どおり加算し、NANKAN_JOCKEY_SWITCH_DELTA=0 で外せる。
+            if os.environ.get("NANKAN_JOCKEY_SWITCH_DELTA", "1") not in ("0", "false", "False"):
+                score_2 += delta
             is_shobu_norikawari = delta >= 2
 
         if not is_jra_exchange and win_rate > jockey_win_rate:
@@ -6852,10 +7131,21 @@ def calculate_horse_scores(
             "jockey_p_base": p_base,
             "jockey_p_prev": p_prev,
             "compat_win_rate": win_rate,
-            "compat_n": n_count
+            "compat_n": n_count,
+            "ability_form": (ability_feats.get(str(umaban)) or {}).get("form"),
+            "ability_speed": (ability_feats.get(str(umaban)) or {}).get("speed"),
+            "ability_last_rank": (ability_feats.get(str(umaban)) or {}).get("last_rank"),
+            "ability_runs": (ability_feats.get(str(umaban)) or {}).get("runs", 0),
+            "jockey_source": "NAR CSV" if csv_jockey_detail else "2025騎手パワー",
+            "jockey_csv_detail": csv_jockey_detail,
+            "jockey_csv_line": (
+                nar_bridge.jockey_line(csv_jockey_detail, current_jockey, current_trainer)
+                if csv_jockey_detail else ""
+            ),
         }
 
     apply_no_relative_scores(scored_data)
+    apply_ability_allocation(scored_data)
 
     return scored_data, relative_html, same_condition_locks, internal_verdicts
 
@@ -6871,25 +7161,27 @@ def _rank_from_totals(totals):
 
     def _band_a(diff):
         # 高得点シナリオ(a): D/E のみ +5 拡張
-        if diff <= 19:   return "A"
-        elif diff <= 29: return "B"
-        elif diff <= 39: return "C"
+        # 2026/09/17 9月大井/川崎93Rの検証で A帯を diff<=9 に絞ると
+        # A複勝率40%→51%・複勝回収率69%→81%(B/C/Dも単調)。B/C も10点刻みへ。
+        if diff <= 9:    return "A"
+        elif diff <= 19: return "B"
+        elif diff <= 29: return "C"
         elif diff <= 54: return "D"
         return "E"
 
     def _band_b(diff):
         # 抜けたトップシナリオ(b): 全バンドを +5 シフト
-        if diff <= 24:   return "A"
-        elif diff <= 34: return "B"
-        elif diff <= 44: return "C"
+        if diff <= 14:   return "A"
+        elif diff <= 24: return "B"
+        elif diff <= 34: return "C"
         elif diff <= 54: return "D"
         return "E"
 
     def _band_default(diff):
-        # S 無しシナリオ: 従来通り
-        if diff <= 19:   return "A"
-        elif diff <= 29: return "B"
-        elif diff <= 39: return "C"
+        # S 無しシナリオ
+        if diff <= 9:    return "A"
+        elif diff <= 19: return "B"
+        elif diff <= 29: return "C"
         elif diff <= 49: return "D"
         return "E"
 
@@ -6948,6 +7240,54 @@ def apply_score_floor_to_grades(grades, horses_data, scored_data):
         if cur_val and cur_val < min_val:
             new_grades[name] = val_to_rank.get(min_val, "E")
 
+    return new_grades
+
+
+E_RESCUE_SPEED_RANK = 3     # 速度指数が出走馬内3位以内
+E_RESCUE_JOCKEY_SCORE = 10  # ②騎手点10以上(P7相当)
+_E_RESCUE_LEAD_RE = re.compile(r"【近走】(?:逃げ|番手か逃げ|逃げか番手)")
+
+
+def apply_e_rescue_floor(grades, horses_data, scored_data):
+    """最終評価Eの馬に「馬券に絡みやすい材料」があればDへ引き上げる(E禁止条件)。
+
+    2026/09/17 9月大井/川崎93R(延べ1038頭)で馬券に絡んだE評価6頭を検証すると、
+    E全体と比べて 速度指数の出走馬内順位(平均5.3位 vs 9.8位)・騎手点(7.0 vs 3.7)・
+    逃げ型の近走(50% vs 9%) が突出していた。
+      条件: 速度指数3位以内 / ②騎手点10以上 / 近走が逃げ(番手か逃げ)型
+    のいずれかを満たすE馬(28頭)のうち4頭が3着内(残りE 96頭は2頭=2%)。
+    Eからの引き上げ先はDに固定し、S/A/B/Cの序列には触れない。
+    """
+    if not grades or not horses_data or not scored_data:
+        return grades
+    new_grades = dict(grades)
+    for umaban, data in horses_data.items():
+        name_norm = _norm_horse_name(data.get("name", ""))
+        if not name_norm or _rank_floor_e(new_grades.get(name_norm, "")) != "E":
+            continue
+        sc = scored_data.get(str(umaban), scored_data.get(umaban, {})) or {}
+        reasons = []
+        try:
+            spd_rank = int(sc.get("common_speed_rank") or 0)
+        except (TypeError, ValueError):
+            spd_rank = 0
+        if 1 <= spd_rank <= E_RESCUE_SPEED_RANK:
+            reasons.append(f"速度指数{spd_rank}位")
+        try:
+            s2 = int(sc.get("score_2", 0) or 0)
+        except (TypeError, ValueError):
+            s2 = 0
+        if s2 >= E_RESCUE_JOCKEY_SCORE:
+            reasons.append(f"騎手{s2}点")
+        try:
+            summary = build_race_content_summary(data.get("hist", []) or [])
+        except Exception:
+            summary = ""
+        if _E_RESCUE_LEAD_RE.search(summary or ""):
+            reasons.append("逃げ型")
+        if reasons:
+            new_grades[name_norm] = "D"
+            sc["e_rescue_reason"] = "/".join(reasons)
     return new_grades
 
 
@@ -7081,9 +7421,49 @@ def _danwa_leading_mark(text):
     return m.group(1) if m else ""
 
 
+def ability_allocation_enabled():
+    """A案（相対30/騎手10/近走10/速度30/前走20 で65点）を使うか。NANKAN_ALLOCATION=legacy で従来式。"""
+    return nar_bridge is not None and os.environ.get("NANKAN_ALLOCATION", "A").strip().upper() == "A"
+
+
+def apply_ability_allocation(scored_data):
+    """②騎手15＋⑤相対50 の65点枠を、A案の5材料で配り直した「⑧能力点」を付ける。
+
+    材料はレース内で0〜1に揃える（相対=点/50、騎手=点/15、近走・速度はレース内の
+    最小〜最大、前走=1/前走着順）。欠損は0.5の中立。scripts/backtest_bottom_allocation.py と同じ式。
+    apply_no_relative_scores の後に呼ぶ（⑤の補完点を材料にするため）。
+    """
+    if not scored_data or not ability_allocation_enabled():
+        return scored_data
+    keys = list(scored_data.keys())
+    rel = [min(1.0, max(0.0, float(scored_data[k].get("score_5", 0) or 0) / 50.0)) for k in keys]
+    joc = [min(1.0, max(0.0, float(scored_data[k].get("score_2", 0) or 0) / 15.0)) for k in keys]
+    form = nar_bridge.normalize_in_race([scored_data[k].get("ability_form") for k in keys])
+    speed = nar_bridge.normalize_in_race([scored_data[k].get("ability_speed") for k in keys],
+                                         cap=nar_bridge.SPEED_CLIP)
+    last = []
+    for k in keys:
+        lr = scored_data[k].get("ability_last_rank")
+        last.append((1.0 / float(lr)) if lr else 0.0)
+    w = nar_bridge.ABILITY_WEIGHTS
+    for i, k in enumerate(keys):
+        raw = (w["rel"] * rel[i] + w["jockey"] * joc[i] + w["form"] * form[i]
+               + w["speed"] * speed[i] + w["last"] * last[i])
+        scored_data[k]["score_ability"] = int(round(raw * nar_bridge.ABILITY_POINTS))
+        scored_data[k]["ability_parts"] = {
+            "相対": round(w["rel"] * rel[i] * nar_bridge.ABILITY_POINTS, 1),
+            "騎手": round(w["jockey"] * joc[i] * nar_bridge.ABILITY_POINTS, 1),
+            "近走": round(w["form"] * form[i] * nar_bridge.ABILITY_POINTS, 1),
+            "速度": round(w["speed"] * speed[i] * nar_bridge.ABILITY_POINTS, 1),
+            "前走": round(w["last"] * last[i] * nar_bridge.ABILITY_POINTS, 1),
+        }
+    return scored_data
+
+
 def _deterministic_total(sc):
     """1頭の合計点(最大100＋盛返③上乗せ)。
-    通常: ②騎手15 + ③盛返 + ④調教20 + ⑤相対50 + ⑥対戦表10。
+    A案(既定): ⑧能力65(相対30/騎手10/近走10/速度30/前走20) + ③盛返 + ④調教20 + ⑥対戦表10。
+    従来(NANKAN_ALLOCATION=legacy): ②騎手15 + ③盛返 + ④調教20 + ⑤相対50 + ⑥対戦表10。
     比較不可馬も通常式で合計し、⑤相対には騎手P順位による
     50〜25点の補完点を使う。"""
     s2 = int(sc.get("score_2", 0) or 0)
@@ -7091,6 +7471,9 @@ def _deterministic_total(sc):
     s4 = int(sc.get("score_4", 0) or 0)
     s5 = int(sc.get("score_5", 0) or 0)
     s6 = int(sc.get("score_6", 0) or 0)
+    if ability_allocation_enabled() and sc.get("score_ability") is not None:
+        s2 = 0
+        s5 = int(sc.get("score_ability", 0) or 0)
     sp = int(sc.get("score_pace", 0) or 0)   # ⑦展開加点(ペース加点＋競馬場×距離の前有利加点)
     spt = int(sc.get("score_pattern", 0) or 0)  # 好走パターン(ユーザーメモ)による±5
     sct = int(sc.get("score_chokyo_top", 0) or 0)  # 全体＋レース内の調教順位加点（合計最大8）
@@ -7162,6 +7545,7 @@ def apply_pattern_bonus(scored_data, horses_data, pace_speed_list, patterns):
 
 def format_deterministic_evaluation(horses_data: dict, cyokyo_data: dict, scored_data: dict, danwa_data: dict):
     apply_no_relative_scores(scored_data)
+    apply_ability_allocation(scored_data)
     totals = []
     for umaban in horses_data.keys():
         sc = scored_data.get(str(umaban), {})
@@ -7279,7 +7663,12 @@ def format_deterministic_evaluation(horses_data: dict, cyokyo_data: dict, scored
         block = f"{circled_num}{horse_name}　{rank}\n"
         block += f"騎:{jockey_disp}　{jockey_stats}\n"
         block += f"【結論:計{total}点】\n"
-        block += f"【内訳】⑤{rel_label}={s5} ④調教{s4}{prev_disp} ②騎手{jockey_score_disp} ⑥対戦{s6} ③盛返{s3}{pace_disp}{pat_disp}{chokyo_top_disp}\n"
+        ability_disp = ""
+        if sc.get("score_ability") is not None and ability_allocation_enabled():
+            parts = sc.get("ability_parts") or {}
+            part_txt = "/".join(f"{k}{v:g}" for k, v in parts.items())
+            ability_disp = f"⑧能力{int(sc['score_ability'])}({part_txt}) "
+        block += f"【内訳】{ability_disp}⑤{rel_label}={s5} ④調教{s4}{prev_disp} ②騎手{jockey_score_disp} ⑥対戦{s6} ③盛返{s3}{pace_disp}{pat_disp}{chokyo_top_disp}\n"
         block += speed_line
         block += f"{flags} 「{comment}」\n" if flags else f"「{comment}」\n"
         block += f"【調教】\n{cyokyo_display}\n"
@@ -7710,6 +8099,17 @@ def get_nankan_kai_nichi(year, month, day, nk_place_code):
     2. 指定の日付と場所(nk_place_code)に合致する「番組表」リンクを特定
     3. そのリンク先に遷移して「第◯回」「第◯日」を抽出する
     """
+    # 現行の公式開催日程から日付が一致するIDを優先する。
+    # bangumi_menu は開催IDが全て0のリンクしか返さない場合がある。
+    try:
+        from nankan_schedule import discover_meetings
+        from datetime import date as _date
+        meetings = discover_meetings(_date(int(year), int(month), int(day)), get_http_session())
+        for meeting in meetings:
+            if meeting.program_id[8:10] == str(nk_place_code).zfill(2):
+                return meeting.kai, meeting.nichi
+    except Exception as e:
+        print(f"公式開催日程からの取得失敗（従来の方法で再試行）: {e}")
     base_url = "https://www.nankankeiba.com"
     menu_url = f"{base_url}/bangumi_menu/bangumi.do"
     
@@ -8298,7 +8698,7 @@ def _fetch_matchup_table_selenium(driver, nankan_id, grades, horses_data=None, c
 
             if line_parts:
                 title = r.get("title", "")
-                link = f"\nLink: {r['url']}" if r.get("url") else ""
+                link = f"\nLink: {_safe_href(r['url'])}" if _safe_href(r.get("url")) else ""
                 is_same_both = (current_course and current_dist and current_course in title and current_dist in title)
                 is_same_course = (current_course and current_course in title)
                 if is_same_both:
@@ -10691,7 +11091,9 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
         yield {"type": "status", "data": f"✅ {place_name} 第{kai}回 {nichi}日目"}
 
         yield {"type": "status", "data": "🔑 競馬ブック ログイン中..."}
-        login_keibabook_robust(driver)
+        logged_in = login_keibabook_robust(driver)
+        if kwargs.get("strict_persistence") and not logged_in:
+            raise RuntimeError("競馬ブックにログインできないため自動更新を中止します")
 
         nankan_base = "https://www.nankankeiba.com"
         nankan_race_prefix = (
@@ -10996,6 +11398,7 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                 grades = apply_internal_rank_locks(grades, rank_locks)
                 grades = adjust_grades_by_jockey_choices(grades, nk_data["horses"])
                 grades = apply_score_floor_to_grades(grades, nk_data["horses"], scored_data)
+                grades = apply_e_rescue_floor(grades, nk_data["horses"], scored_data)
                 grades = ensure_top_grade_presence(grades)
                 grades = apply_display_grade_overrides(grades, nk_data["horses"], scored_data)
 
@@ -11119,8 +11522,14 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                             except Exception as _et:
                                 print(f"  [DB] upsert_training skipped: {_et}")
                         except Exception as _e:
+                            if kwargs.get("strict_persistence"):
+                                raise
                             print(f"  [DB] register_race skipped: {_e}")
+                    elif kwargs.get("strict_persistence"):
+                        raise RuntimeError(f"{r_num}R 生成結果にエラーがあるため保存未完了")
                 except Exception:
+                    if kwargs.get("strict_persistence"):
+                        raise
                     pass
 
                 yield {"type": "result", "race_num": r_num, "data_text": final_text, "data_html": final_html}
@@ -11224,16 +11633,22 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
                                 data_html=rb["html"], data_text=rb["text"],
                             )
                         except Exception as _e2:
+                            if kwargs.get("strict_persistence"):
+                                raise
                             print(f"  [調教上位] DB上書きスキップ {rn}R: {_e2}")
                         applied_races += 1
                         yield {"type": "result", "race_num": p["r_num"], "data_text": rb["text"], "data_html": rb["html"]}
                     except Exception as _ern:
+                        if kwargs.get("strict_persistence"):
+                            raise
                         import traceback
                         print(f"  [調教上位] {rn}R 再描画スキップ: {_ern}")
                         traceback.print_exc()
                 if applied_races:
                     yield {"type": "status", "data": f"🏇 全体・レース内の調教順位を{applied_races}レースに反映しました"}
         except Exception as _e:
+            if kwargs.get("strict_persistence"):
+                raise
             print(f"  [調教上位] 反映スキップ: {_e}")
 
     except Exception as e:

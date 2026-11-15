@@ -1,0 +1,71 @@
+name: 翌日の南関データ自動更新
+
+on:
+  schedule:
+    # UTC 09:17〜14:17 = 日本時間18:17〜23:17。混雑する毎時0分を避ける。
+    - cron: '17 9-14 * * *'
+  workflow_dispatch:
+    inputs:
+      check_only:
+        description: '開催確認のみ（生成・保存しない）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nankan-cloud-auto-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      KEIBABOOK_LOGIN_ID: ${{ secrets.KEIBABOOK_LOGIN_ID }}
+      KEIBABOOK_PASSWORD: ${{ secrets.KEIBABOOK_PASSWORD }}
+      PYTHONUNBUFFERED: '1'
+      CHECK_ONLY: ${{ inputs.check_only || false }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Python依存関係をインストール
+        run: python -m pip install -r requirements.txt
+      - name: 設定・Chromeを確認
+        run: |
+          python tools/check_cloud_update.py
+          google-chrome --version
+      - name: 完了記録を復元
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/cloud_update_state.py download
+      - name: テスト
+        run: python -m unittest test_auto_update test_relative_training_rules -q
+      - name: 翌日の開催を確認して更新
+        run: |
+          mkdir -p logs
+          set -o pipefail
+          if [ "$CHECK_ONLY" = "true" ]; then
+            python auto_update.py --check --require-cloud 2>&1 | tee logs/cloud_auto_update.log
+          else
+            python auto_update.py --run-now --require-cloud 2>&1 | tee logs/cloud_auto_update.log
+          fi
+      - name: 完了記録を保存（途中で失敗した場合も成功した開催は保持）
+        if: ${{ always() && inputs.check_only != true }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/cloud_update_state.py upload
+      - name: 実行ログを保存
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-update-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: logs/cloud_auto_update.log
+          retention-days: 7
+          if-no-files-found: ignore

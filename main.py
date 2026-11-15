@@ -8,6 +8,7 @@ from datetime import timezone, timedelta
 import time
 import traceback
 import re
+from pathlib import Path
 
 # 外部ファイル読み込み（エラーハンドリング付き）
 try:
@@ -34,6 +35,17 @@ def main():
     # --- サイドバー設定 ---
     with st.sidebar:
         st.header("開催設定")
+        with st.expander("翌日のデータ自動更新"):
+            agent_path = Path.home() / "Library/LaunchAgents/com.nankan-ai.auto-update.plist"
+            cloud_marker = Path(__file__).resolve().parent / "cache/cloud_auto_update_enabled.json"
+            if cloud_marker.exists():
+                st.write("クラウド自動更新：設定済み")
+                st.caption("毎日18〜23時台（日本時間）に翌日の開催を確認して全レースを更新します。Macの電源OFF・スリープ中も動作します。")
+                st.link_button("クラウド更新の実行状況", "https://github.com/Krafta-app/NANKAN/actions/workflows/auto-update.yml")
+            else:
+                st.write("Macでの自動更新：設定済み" if agent_path.exists() else "未設定")
+                st.caption("Macで実行する場合は、毎日18〜23時に翌日の全レースを更新します。Macへのログインとスリープ解除が必要です。")
+                st.caption("Macでの初回設定は「④ 翌日データ自動更新を設定.command」、Mac不要のクラウド設定はSETUP.mdを参照してください。")
         # 日本時間をデフォルトにする
         JST = timezone(timedelta(hours=+9), 'JST')
         today = datetime.datetime.now(JST).date()

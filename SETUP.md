@@ -17,6 +17,66 @@
 
 古い名前の **`run_umai.command`** も同じ予想生成画面を開きます。
 
+## 翌日のデータを自動更新する
+
+### Macの電源OFF・スリープ中も更新する（GitHub Actions）
+
+`.github/workflows/auto-update.yml` がGitHubのクラウド上で毎日18:17〜23:17（日本時間）、
+約1時間ごとに翌日の南関開催を確認し、全レースを生成してSupabaseへ保存します。
+Macもアプリ画面も起動する必要はありません。GitHub側の混雑で開始が遅れる場合があります。
+
+リポジトリの **Settings → Secrets and variables → Actions** に、次の4項目を登録します。
+値をソースコードへ書き込まないでください。
+
+| GitHub Actions Secret | 既存のMac設定との対応 |
+|---|---|
+| `SUPABASE_URL` | `.streamlit/secrets.toml` の `[supabase] url` |
+| `SUPABASE_KEY` | `[supabase] key`（サーバー側のservice_roleキー） |
+| `KEIBABOOK_LOGIN_ID` | `[keibabook] login_id` |
+| `KEIBABOOK_PASSWORD` | `[keibabook] password` |
+
+ワークフローをデフォルトブランチに配置すると定期実行が有効になります。
+**Actions → 翌日の南関データ自動更新 → Run workflow** で即時実行も可能です。
+「開催確認のみ」を選ぶと、生成・保存は行いません。
+クラウド用Supabase設定や競馬ブックの認証が無ければエラーで停止します。
+
+開催ごとの完了記録は専用の `codex/auto-update-state` ブランチへ保存します。
+一時キャッシュが消えても、完了済みの開催は再生成しません。
+実行失敗時は次の定期実行で再試行し、ログはActionsで7日間確認できます。
+GitHub側でActionsやワークフローを停止した場合、更新も止まります。
+実行時間はGitHub Actionsの利用枠に算入されます。
+
+クラウドで生成・保存できることを確認した後、Macとの重複を避けるため、Mac側は
+`python3 tools/manage_auto_update.py uninstall` で停止してください。
+クラウド側を停止する場合は、Actions画面からワークフローを無効にします。
+
+### Macで実行する場合
+
+**`④ 翌日データ自動更新を設定.command`** を一度開くと、Macの定期実行に登録します。
+画面を開いていなくても、日本時間18〜23時の間、約1時間ごとに公式開催日程を確認します。
+
+- 翌日の南関4場の開催を判定し、開催回・何日目かと対象レースを自動取得
+- 開催がある競馬場の全レースを、通常の相対評価予想モードで生成・保存
+- Supabase設定済みならVercelにも反映。未設定ならローカルSQLite・キャッシュへ保存
+- 全レースの生成・保存が完了した開催はその晩の再実行をスキップ
+- 未公開・取得失敗・保存失敗は次回確認時に再試行（失敗時は開催全体を再計算）
+
+Macにログインしていて、スリープしていないこと・インターネット接続が必要です。
+電源OFF・スリープ中は動きません。更新開始後の処理は23時を過ぎても継続します。
+毎時の起動なので、確認は18時ちょうどとは限りません。競馬ブックなどの設定は通常の予想生成と共通です。
+当日のオッズ・馬体重・出走取消などを追跡する機能ではありません。
+
+確認・停止はプロジェクトのフォルダで次を実行します。
+
+```sh
+python3 auto_update.py --check                 # 翌日の開催とレースのみ確認（保存しない）
+python3 tools/manage_auto_update.py status     # 定期実行の状態
+python3 tools/manage_auto_update.py uninstall  # 自動更新を停止
+```
+
+ログは `logs/auto_update.log` と `logs/auto_update_error.log`、完了記録は
+`cache/auto_update_state.json` に保存します。強制再取得は `python3 auto_update.py --force` です。
+
 ## 指数の基準タイム更新
 
 **`③ 指数基準タイムを更新.command`** を開くと、速度指数の基準を最新化します。
@@ -68,3 +128,12 @@ db.py        ローカルSQLite保存
 fetch_results.py レース結果取得
 vercel_site/ Vercelで見るWebサイト
 ```
+
+## NAR月次CSVの実績を使う
+
+騎手評価と相対評価の材料を、NAR公式の月次レースCSVから作れるようになりました。
+仕組み・検証結果・止め方は [docs/NAR_CSV_MODEL.md](docs/NAR_CSV_MODEL.md) を見てください。
+
+CSVは `cache/nar_speed_csv/monthly/*.zip`（`tools/update_nar_speed_reference.py` が取得）と
+`data/nar_csv/`、`../../ばんえい予想/data/` から自動で読みます。何も無ければ
+これまで通りスクレイピングだけで動きます。

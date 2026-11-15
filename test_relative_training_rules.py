@@ -1,3 +1,4 @@
+import os
 import unittest
 import zipfile
 from datetime import date, datetime
@@ -6,6 +7,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import keiba_bot as kb
+import nar_bridge
+import nar_history
 import tools.update_nar_speed_reference as nar_updater
 
 
@@ -90,6 +93,38 @@ class RelativeTierConsistencyTests(unittest.TestCase):
             {"horse": {"top1": "direct", "top2": "bridge"}},
         )
         self.assertEqual(tiers["horse"], "B")
+
+
+class BridgeYardstickVoteTests(unittest.TestCase):
+    """ばんえい移植: 隠れ馬(物差し馬)1頭は何レース比較できても1票。"""
+
+    @staticmethod
+    def _entry(hidden, diff):
+        return {
+            "raw_diff": diff, "diff": diff * 0.5, "bridge_priority": 5,
+            "place": "川崎", "dist": "1500", "date": datetime.now(),
+            "via_hidden": hidden,
+        }
+
+    def test_same_yardstick_multiple_races_count_as_one_vote(self):
+        entries = [self._entry("ものさしA", 1.5) for _ in range(3)]
+        with patch.object(kb, "_REL_BRIDGE_VOTE_BY_YARDSTICK", True):
+            sym, pos, neg = kb._bridge_consensus_symbol(entries, 1500)
+        self.assertEqual(sym, ">")
+        self.assertEqual((pos, neg), (1, 0))
+
+    def test_two_yardsticks_count_as_two_votes(self):
+        entries = [self._entry("ものさしA", 1.5), self._entry("ものさしB", 1.4)]
+        with patch.object(kb, "_REL_BRIDGE_VOTE_BY_YARDSTICK", True):
+            sym, pos, neg = kb._bridge_consensus_symbol(entries, 1500)
+        self.assertEqual(sym, ">")
+        self.assertEqual((pos, neg), (2, 0))
+
+    def test_legacy_mode_counts_each_race(self):
+        entries = [self._entry("ものさしA", 1.5) for _ in range(3)]
+        with patch.object(kb, "_REL_BRIDGE_VOTE_BY_YARDSTICK", False):
+            _, pos, neg = kb._bridge_consensus_symbol(entries, 1500)
+        self.assertEqual((pos, neg), (3, 0))
 
 
 class CommonSpeedIndexTests(unittest.TestCase):
@@ -547,6 +582,111 @@ class RelativeTierConsistencyAdditionalTests(unittest.TestCase):
             {"horse": {"second": "bridge"}},
         )
         self.assertEqual(tiers["horse"], "B")
+
+
+class NarCsvHistoryTests(unittest.TestCase):
+    """NAR月次CSVから作る実績データベースの読み取り部分。"""
+
+    def test_csv_time_is_read_as_seconds(self):
+        self.assertAlmostEqual(nar_history.parse_csv_time("1499"), 109.9)
+        self.assertAlmostEqual(nar_history.parse_csv_time("2062"), 126.2)
+        self.assertAlmostEqual(nar_history.parse_csv_time("589"), 58.9)
+        self.assertIsNone(nar_history.parse_csv_time(""))
+        self.assertIsNone(nar_history.parse_csv_time("12"))
+
+    def test_corner_order_groups_share_a_position(self):
+        got = nar_history.parse_corner_order("(4,5,10),(1,9),(3,6)-7-(2,8)")
+        self.assertEqual(got[4], 1)
+        self.assertEqual(got[10], 1)
+        self.assertEqual(got[1], 4)
+        self.assertEqual(got[3], 6)
+        self.assertEqual(got[7], 8)
+        self.assertEqual(got[2], 9)
+
+    def test_season_starts_in_april(self):
+        self.assertEqual(nar_history.season_start(date(2026, 3, 31)), date(2025, 4, 1))
+        self.assertEqual(nar_history.season_start(date(2026, 4, 1)), date(2026, 4, 1))
+
+    def test_short_name_resolution_prefers_prefix(self):
+        pool = {"藤本現": 10, "御神訓": 8, "藤田凌": 5}
+        cache = {}
+        self.assertEqual(nar_history._resolve_short_name("藤本現世", pool, cache), "藤本現")
+        self.assertEqual(nar_history._resolve_short_name("御神本訓史", pool, cache), "御神訓")
+        self.assertEqual(nar_history._resolve_short_name("該当なし", pool, cache), "")
+
+
+class NarBridgeTests(unittest.TestCase):
+    """keiba_bot からCSVを使うための橋渡し。"""
+
+    def test_race_key_from_nankan_url(self):
+        url = "https://www.nankankeiba.com/race/result/2026081220090108.do"
+        self.assertEqual(nar_bridge.parse_key(url), ("大井", date(2026, 8, 12), 8))
+
+    def test_race_key_round_trips_through_csv_key(self):
+        key = nar_bridge.csv_key("船橋", date(2026, 8, 12), 3)
+        self.assertEqual(key, "nar://船橋/20260812/3")
+        self.assertEqual(nar_bridge.parse_key(key), ("船橋", date(2026, 8, 12), 3))
+
+    def test_unknown_url_has_no_key(self):
+        self.assertIsNone(nar_bridge.parse_key("https://example.com/foo"))
+        self.assertIsNone(nar_bridge.parse_key(""))
+
+    def test_csv_key_is_not_rendered_as_a_link(self):
+        self.assertEqual(kb._safe_href("nar://大井/20260812/1"), "")
+        self.assertEqual(
+            kb._safe_href("https://www.nankankeiba.com/race/result/2026081220090108.do"),
+            "https://www.nankankeiba.com/race/result/2026081220090108.do",
+        )
+
+
+class CsvHistExtensionTests(unittest.TestCase):
+    """過去走のCSV補完は、既にある走りを消さず・追い越さない。"""
+
+    def _horse(self, hist):
+        return {"1": {"name": "テストウマ", "hist": list(hist)}}
+
+    def test_disabled_by_environment(self):
+        horses = self._horse([{"date": "2026.08.01", "url": "u1"}])
+        with patch.dict(os.environ, {"NANKAN_CSV_HIST": "0"}):
+            added = kb.extend_hist_with_csv(horses, datetime(2026, 9, 1), "大井", 5)
+        self.assertEqual(added, 0)
+        self.assertEqual(len(horses["1"]["hist"]), 1)
+
+    def test_only_older_runs_are_appended(self):
+        horses = self._horse([{"date": "2026.08.01", "url": "u1"}])
+        rows = [{"date": "2026.05.01", "url": "nar://大井/20260501/3", "from_csv": True}]
+        with patch.dict(os.environ, {"NANKAN_CSV_HIST": "1"}), \
+                patch.object(kb.nar_bridge, "extra_hist_rows", return_value=rows) as spy:
+            added = kb.extend_hist_with_csv(horses, datetime(2026, 9, 1), "大井", 5)
+        self.assertEqual(added, 1)
+        self.assertEqual(horses["1"]["hist"][0]["url"], "u1")
+        self.assertTrue(horses["1"]["hist"][1]["from_csv"])
+        # スクレイピング済みで最も古い走りより前だけを取りにいく。
+        self.assertEqual(spy.call_args.kwargs["oldest_known"], datetime(2026, 8, 1))
+
+
+
+class AbilityAllocationTests(unittest.TestCase):
+    """A案: ②騎手＋⑤相対の65点枠を5材料で配り直す。"""
+
+    def test_allocation_replaces_jockey_and_relative_in_total(self):
+        sc = {"1": {"score_2": 15, "score_5": 50, "score_4": 10, "score_3": 0, "score_6": 5,
+                    "ability_form": 1.0, "ability_speed": 2.0, "ability_last_rank": 1},
+              "2": {"score_2": 0, "score_5": 25, "score_4": 0, "score_3": 0, "score_6": 0,
+                    "ability_form": -1.0, "ability_speed": -2.0, "ability_last_rank": 5}}
+        with patch.dict(os.environ, {"NANKAN_ALLOCATION": "A"}):
+            kb.apply_ability_allocation(sc)
+            self.assertEqual(sc["1"]["score_ability"], 65)   # 全材料で1位 → 満点
+            self.assertEqual(kb._deterministic_total(sc["1"]), 65 + 10 + 5)
+            self.assertLess(sc["2"]["score_ability"], 20)
+        with patch.dict(os.environ, {"NANKAN_ALLOCATION": "legacy"}):
+            self.assertEqual(kb._deterministic_total(sc["1"]), 15 + 50 + 10 + 5)
+
+    def test_missing_material_is_neutral(self):
+        vals = nar_bridge.normalize_in_race([None, None])
+        self.assertEqual(vals, [0.5, 0.5])
+        vals = nar_bridge.normalize_in_race([10.0, None, 0.0], cap=6.0)
+        self.assertEqual(vals, [1.0, 0.5, 0.0])
 
 
 if __name__ == "__main__":
