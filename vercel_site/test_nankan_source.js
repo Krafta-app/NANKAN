@@ -1,0 +1,15 @@
+const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
+const { authOk, PATH_PATTERN } = require("./api/nankan-source");
+const path = "/calendar/202610.do";
+const timestamp = "1794730000";
+const key = "test-only-key";
+const signature = crypto.createHmac("sha256", key).update(`nankan-fetch-v1\n${timestamp}\n${path}`).digest("hex");
+assert(authOk(path, timestamp, signature, key, Number(timestamp) * 1000));
+assert(!authOk(path, timestamp, signature, "wrong-key", Number(timestamp) * 1000));
+assert(!authOk(path, timestamp, signature, key, Number(timestamp) * 1000 + 121000));
+assert(!authOk("/program/20261116201201.do", timestamp, signature, key, Number(timestamp) * 1000));
+assert(!authOk(path, timestamp, "invalid", key, Number(timestamp) * 1000));
+for (const accepted of [path, "/syousai/2026111620120101.do?type=uma_shosai", "/uma_info/2023101234.do"]) assert(PATH_PATTERN.test(accepted));
+for (const rejected of ["https://example.com/", "//example.com/", "/../api/config", "/login.do", "/calendar/202610.do?url=https://example.com/"]) assert(!PATH_PATTERN.test(rejected));
+console.log("Nankan source signature and path restrictions OK");
