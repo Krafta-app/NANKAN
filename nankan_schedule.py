@@ -88,7 +88,9 @@ def discover_meetings(target_date, session=None):
     html = fetch_html(session, f"/calendar/{target_date.year}{quarter_month:02}.do")
     soup = BeautifulSoup(html, "html.parser")
     if not soup.title or "開催日程" not in soup.title.get_text():
-        raise ValueError("公式開催日程を取得できません（再試行が必要です）")
+        title = soup.title.get_text(strip=True) if soup.title else "タイトルなし"
+        message = soup.get_text(" ", strip=True)[:160]
+        raise ValueError(f"公式開催日程を取得できません: {title} / {message}")
     return parse_meetings(html, target_date)
 
 
