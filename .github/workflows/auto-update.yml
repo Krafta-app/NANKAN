@@ -29,6 +29,7 @@ jobs:
       KEIBABOOK_PASSWORD: ${{ secrets.KEIBABOOK_PASSWORD }}
       PYTHONUNBUFFERED: '1'
       CHECK_ONLY: ${{ inputs.check_only || false }}
+      NANKAN_FETCH_GATEWAY: https://nankan.vercel.app/api/nankan-source
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -46,7 +47,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python tools/cloud_update_state.py download
       - name: テスト
-        run: python -m unittest test_auto_update test_relative_training_rules -q
+        run: |
+          python -m unittest test_nankan_http test_auto_update test_relative_training_rules -q
+          node vercel_site/test_nankan_source.js
       - name: 翌日の開催を確認して更新
         run: |
           mkdir -p logs

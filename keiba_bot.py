@@ -3011,7 +3011,8 @@ def lookup_power(place_name, jockey_name, power_data):
 # ==================================================
 @st.cache_resource
 def get_http_session() -> requests.Session:
-    sess = requests.Session()
+    from nankan_http import create_session
+    sess = create_session()
     sess.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
@@ -11101,8 +11102,15 @@ def run_races_iter(year, month, day, place_code, target_races, mode="dify", manu
             f"{str(nk_place_code).zfill(2)}{int(kai):02d}{int(nichi):02d}"
         )
         prog_url = f"{nankan_base}/program/{nankan_race_prefix}.do"
-        driver.get(prog_url)
-        soup = BeautifulSoup(driver.page_source, "html.parser")
+        try:
+            program_response = get_http_session().get(prog_url, timeout=20)
+            program_response.raise_for_status()
+            program_response.encoding = "cp932"
+            program_html = program_response.text
+        except Exception:
+            driver.get(prog_url)
+            program_html = driver.page_source
+        soup = BeautifulSoup(program_html, "html.parser")
 
         r_nums = []
         race_detail_urls = {}

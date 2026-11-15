@@ -25,6 +25,14 @@
 約1時間ごとに翌日の南関開催を確認し、全レースを生成してSupabaseへ保存します。
 Macもアプリ画面も起動する必要はありません。GitHub側の混雑で開始が遅れる場合があります。
 
+南関公式はGitHub標準実行環境からの接続を拒否するため、公開レースページの取得は
+既存Vercelサイト `https://nankan.vercel.app/api/nankan-source` の東京リージョン経由です。
+呼び出しはSupabaseキーから生成した2分有効の署名で認証し、キー自体は送信しません。
+取得先とパスを南関公式の公開レース情報に限定し、ログイン情報・Cookieは転送しません。
+Vercel側は既存の `SUPABASE_SERVICE_ROLE_KEY`（または `SUPABASE_KEY`）を使用し、
+GitHub Secretsの `SUPABASE_KEY` と同じ値である必要があります。
+`NANKAN_FETCH_GATEWAY` 環境変数が空なら従来どおり直接取得します。
+
 リポジトリの **Settings → Secrets and variables → Actions** に、次の4項目を登録します。
 値をソースコードへ書き込まないでください。
 

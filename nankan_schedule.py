@@ -3,6 +3,7 @@ import re
 from dataclasses import dataclass
 import requests
 from bs4 import BeautifulSoup
+from nankan_http import create_session
 
 BASE_URL = "https://www.nankankeiba.com"
 PLACES = {"20": ("10", "大井"), "21": ("11", "川崎"),
@@ -82,7 +83,7 @@ def fetch_browser_html(url):
 
 
 def discover_meetings(target_date, session=None):
-    session = session or requests.Session()
+    session = session or create_session()
     # 年間日程は四半期の先頭月を指定する（11月なら10月）。
     quarter_month = ((target_date.month - 1) // 3) * 3 + 1
     html = fetch_html(session, f"/calendar/{target_date.year}{quarter_month:02}.do")
@@ -95,7 +96,7 @@ def discover_meetings(target_date, session=None):
 
 
 def discover_races(meeting, session=None):
-    html = fetch_html(session or requests.Session(), f"/program/{meeting.program_id}.do")
+    html = fetch_html(session or create_session(), f"/program/{meeting.program_id}.do")
     races = set()
     for a in BeautifulSoup(html, "html.parser").select("a[href]"):
         match = re.search(r"/syousai/(\d{16})\.do(?:[?#]|$)", a["href"])
