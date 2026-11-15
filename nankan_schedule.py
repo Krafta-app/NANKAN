@@ -7,6 +7,11 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://www.nankankeiba.com"
 PLACES = {"20": ("10", "大井"), "21": ("11", "川崎"),
           "19": ("12", "船橋"), "18": ("13", "浦和")}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
 
 
 @dataclass(frozen=True)
@@ -47,7 +52,7 @@ def parse_meetings(html, target_date):
 
 
 def fetch_html(session, path):
-    response = session.get(BASE_URL + path, timeout=30)
+    response = session.get(BASE_URL + path, timeout=30, headers=HEADERS)
     response.raise_for_status()
     response.encoding = "cp932"
     return response.text
