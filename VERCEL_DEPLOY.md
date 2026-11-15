@@ -11,7 +11,8 @@
 
 | 役割 | 使うもの |
 |---|---|
-| 新しい予想を作る | Macの `MacBookで予想を作る.command` |
+| 翌日分の予想を自動生成 | GitHub Actions（公式データはVercel東京リージョンで取得） |
+| 手動で予想を再生成 | Macの `MacBookで予想を作る.command` |
 | 予想・結果・メモの保管 | Supabase |
 | 普通のWebサイト画面 | Vercel |
 | 独自ドメイン | Cloudflare DNS |
@@ -61,12 +62,15 @@ Cloudflare DNSでは、Vercel画面に表示された指示どおりに入れま
 
 ## 4. 日常の使い方
 
-1. Macで予想を作る
-2. 予想がSupabaseへ保存される
+1. クラウドが毎晩、翌日の開催を確認して全レースの予想を作る
+2. 予想がSupabaseへ自動保存される
 3. スマホでVercel/独自ドメインのURLを開く
 4. メモを書く場合はPINを入れて保存
 
 Mac側の `.streamlit/secrets.toml` にSupabase設定が入っていれば、予想生成時にVercelサイトへ反映されます。
+Macから手動で再生成することもできます。クラウドの設定・停止方法は
+[SETUP.md](SETUP.md#翌日のデータを自動更新する) を参照してください。
+クラウド自動更新ではMacの起動やスリープ解除は不要です。
 
 ## 5. ローカル確認
 
